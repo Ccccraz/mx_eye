@@ -1,0 +1,289 @@
+# mx_eye 0.1.0
+
+First integrated MXBI pupil / corneal-reflection tracker, with a separate receiver SDK.
+Python 3.10+; desktop UI for Windows/Linux.
+
+## Run it
+
+Extract this folder and run the scripts directly. If their dependencies are not
+already installed, install them once from a terminal in the extracted folder:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Start the tracker and, in a second terminal, the receiver:
+
+```bash
+python mx_eye.py
+python mx_eye_receiver.py
+```
+
+For a camera-free first check:
+
+```bash
+python mx_eye.py --demo
+```
+
+Click **Start** in the tracker. In the receiver click **Connect**; its **Start tracker**
+and **Stop tracker** buttons control the same session. START is idempotent when already running.
+Alternatively, connect the receiver first and start the session from there.
+
+Run the launcher files as whole scripts. Multiprocessing requires their `__main__`
+guards; running individual GUI/worker definitions interactively is not supported.
+
+## Tracker controls
+
+- **Frame navigation fix:** seeking pauses on the selected frame. Frame numbers
+  and slider positions come from the displayed preview. Held arrow keys request
+  the next step only after the previous step is displayed, preventing a backlog.
+  Template/feature selection first freezes the displayed video frame. Recent
+  decoded frames are cached (64 MiB); larger backward jumps decode from the start
+  to preserve exact frame numbering, so long jumps can take time. The timeline
+  initially uses the container's frame-count estimate and corrects it when the
+  decoder reaches the end. End-of-file leaves the last frame available to step back.
+  A focused check with a generated H.264/MKV clip verified frame identities after
+  seeks and steps, EOF correction, and template selection without changing frames.
+  Windows GUI keyboard/mouse behavior still needs checking on the target machine.
+
+- **Pupil-only output:** choose Absolute (full-image top-left origin) or Relative
+  (yellow ROI top-left origin) above the X/Y plots, beneath the video. Applies to displayed,
+  transmitted and recorded X/Y. Pupil + CR remains pupil minus CR. A moving ROI
+  changes the relative origin; this is not calibrated gaze or full head-motion
+  compensation. Raw pupil_x/pupil_y remain absolute. The SDK exposes
+  `sample.coordinate_system`; packet/CSV flag bit 32 marks ROI-relative output.
+- **Video navigation:** Left/Right arrows pause and step one frame backward/forward.
+  Parameter editors keep their normal arrow-key behavior. Click anywhere on the
+  timeline to seek immediately, or drag and release. Play/Pause changes its label
+  with playback state. At the last frame playback pauses; Play restarts at frame 1.
+- Hover over controls and parameters for short explanations and units.
+
+- **Camera settings → Camera:** on Windows, connected DirectShow cameras are listed
+  by name. Refresh after plugging in a camera. Selection prefers the highest
+  resolution with a reported mode of at least 29 fps, or the fastest reported
+  mode if none qualifies. Choose a resolution and camera format (for example,
+  MJPG or YUY2) separately; the requested FPS starts at that format's reported
+  maximum. The source line shows the format and FPS reported by the opened camera,
+  while ACQ shows the measured rate. Discovery runs in a
+  separate process and is available while tracking is stopped. If enumeration is
+  unavailable, manual settings remain available. Other operating systems currently
+  use manual camera settings. Install the new Windows dependency once with
+  `python -m pip install pygrabber` (also included in requirements.txt).
+- **Area limit preview:** adjusting pupil or CR minimum/maximum area shows a blue
+  or red disk at the bottom-left of the eye-detail image for three seconds after
+  the last adjustment. Its radius is `sqrt(area / pi)` in source pixels, scaled
+  with the displayed ROI. An 80%-opaque black square keeps it readable. Oversized
+  disks are clipped and marked, never silently shrunk. These are display overlays
+  and are not included in the recorded video.
+
+- **Camera / Video / Simulation:** choose the source. Stop before switching sources.
+- **Open video:** choose an existing file; it begins playback immediately. Pause, advance one frame,
+  or seek with the bottom timeline. While paused, threshold/ROI edits update the
+  image without emitting a new sample or advancing tracking history.
+- **Full view:** drag to move the yellow ROI; drag its lower-right corner to resize;
+  Shift-drag to draw a new ROI. The mouse wheel zooms the source view around the
+  pointer. Above 100% zoom, a zoom label and Reset button appear inside the view.
+- **Eye detail:** left click seeds the pupil and estimates its threshold; right click
+  seeds the corneal reflection. Thresholds remain manually adjustable.
+- **Template:** right click in the full view, or Shift-click in the eye detail view.
+  The template moves the eye ROI while its correlation passes the threshold.
+  Drag the magenta search-box border to move its fixed search region. Change its
+  size with the Template / ROI slider. Re-picking preserves that search region.
+- **Tracking mode:** choose Pupil + CR (pupil minus CR) or Pupil only (absolute or ROI-relative pupil position).
+- Click section headings to collapse/expand sliders. Numeric boxes accept typed
+  values as well as small increments. The controls scroll when space is tight.
+- **Settings:** camera index, requested mode/FPS, network addresses/ports, recording
+  location, buffer size, and codec. Changes require a stopped session.
+- **Visible controls:** Load/Save config in the top row; camera index and requested FPS beside
+  them. Playback speed is next to Pause and the timeline, and can change live.
+- **Video layout:** equally sized eye-detail (left) and source (right) panels.
+  Pupil/CR mask switches and Centers sit above eye detail. Template size and Template inset above
+  the source independently toggle the template-radius circle and small template
+  preview. Click instructions stay below each video. Slider values sit beside
+  their sliders in compact, collapsible groups.
+- **Configuration:** Save/Load JSON also preserves these display switches.
+  Configurations include the template image. v13 configuration JSON can also be
+  imported; those old files did not embed the separate template image.
+- **Load/Save template:** visible top-row buttons import an image or export PNG.
+
+Camera index 0 is usually the first camera. On Windows, Auto chooses DirectShow;
+MSMF is available if the camera works better with that backend. Set a camera mode
+supported by your OV9281, for example 640x480, requested 120 FPS, MJPG. These are
+requests, not promises from the camera. The acquisition-rate readout is measured.
+OpenCV receives UVC cameras; Raspberry Pi CSI/libcamera capture is not implemented.
+
+## What runs independently
+
+1. **Acquisition process:** reads the source and timestamps each returned frame.
+   Publishes the latest frame to tracking before offering it to recording.
+2. **Tracking process:** v13 pupil/CR and template logic, then nonblocking sample
+   transmission. It does no GUI rendering, video encoding, or disk writing.
+3. **Recording process:** consumes a separate bounded FIFO, encodes full frames,
+   and writes frame timestamps and tracking rows.
+4. **GUI:** displays the latest preview frame and updates plots at 25 Hz. It never
+   requests or schedules the next camera frame.
+
+The source-to-tracker mailbox, UI preview mailbox, and recording FIFO use shared memory. Slot
+ownership protects frame bytes from being overwritten during a read. Recording
+can retain every acquired frame even when tracking deliberately skips older frames.
+The SKIPPED counter shows acquired frames not processed by the tracker.
+File playback waits for each frame to be processed; heavy tracking may therefore
+slow playback, rather than skipping source frames.
+
+Acquisition/tracking request Above Normal priority on Windows and nice -5 on
+Linux. Recording requests a lower CPU priority. If the OS denies a priority
+change, the worker continues at normal priority and reports that in SDK status.
+OpenCV uses one worker thread per process to reduce oversubscription.
+This is best-effort scheduling, **not a hard real-time guarantee**. CPU, memory
+bandwidth, camera/USB buffering, and OS scheduling still affect latency.
+
+## Recording and integrity
+
+Every **camera session records automatically**, from Start until Stop. Simulation
+recording is optional; file playback does not duplicate the source video.
+Each session gets a unique subfolder under the configured output directory:
+
+| File | Contents |
+|---|---|
+| `video.avi` | MJPG full-frame video; fast, lossy compression, no overlays |
+| `video.mkv` | Alternative FFV1 lossless full-frame video; more CPU demand |
+| `frames.csv` | Video index, acquired source-frame ID, host acquisition timestamp, media time |
+| `tracking.csv` | Every locally logged tracking sample, with timestamps, coordinates and flags |
+| `config.json` | Configuration at session start |
+| `session.json` | Final counts, completion status and any detected fault |
+
+`frames.csv` is the timing authority. Video containers use a nominal constant FPS;
+actual camera frame intervals may vary. Frame IDs connect video to tracking rows.
+Parameter adjustments during acquisition affect tracking.csv; config.json records
+starting settings only. Save the final configuration separately if needed.
+
+The configurable memory budget is a finite buffer, not an unlimited guarantee.
+If the writer cannot keep up and that buffer fills, recording stops accepting new
+frames, the queued prefix is finalized, and the session is marked incomplete.
+**Tracking continues.** A disk/write fault is similarly visible. Restart a new
+session after resolving the fault. It is impossible to guarantee both unlimited
+lossless recording and nonblocking tracking on a stalled disk with finite RAM.
+
+Stop initiates orderly shutdown and buffer draining. Wait for IDLE or ERROR before
+starting another session or removing the disk. Closing the tracker waits for this.
+A hung camera is forcibly stopped after 5 seconds; hung tracking/writing after
+30 seconds. Forced termination marks the session incomplete. After abrupt power
+loss, a missing session.json must also be treated as an incomplete session.
+
+Completion checks compare acquired/enqueued/written counts and reopen the video
+container to check readability and reported frame count. This is not a full
+post-recording decode of every frame. The backend cannot expose frames lost inside
+the camera or USB driver. `tracking_log_complete` separately reports log overflow.
+
+## SDK
+
+The SDK itself uses only the Python standard library. Install the package without
+GUI extras on the receiving machine:
+
+```bash
+python -m pip install .
+```
+
+Or copy the `app` directory onto the Python path; importing `app.Client` does
+not import Qt, OpenCV, or the tracking service. A top-level example is in
+`examples/receive_minimal.py`.
+
+```python
+from app import Client
+
+with Client('127.0.0.1') as eye:
+    eye.start()
+    # Inside your behavioral-task loop:
+    sample = eye.latest(max_age_ms=50)
+    if sample is not None:
+        x, y = sample.x, sample.y
+    # At the end of the session:
+    eye.stop()
+```
+
+`latest()` can initially return None while clock synchronization or tracking is
+starting. It also rejects invalid/lost or stale samples; never use the previous
+valid point as if it were a current measurement. `latest(max_age_ms=None,
+require_valid=False)` is intended for diagnostics. `drain()` returns buffered
+samples for plotting/logging and clears that buffer. A background thread receives
+regardless of how often your code calls either method. Its bounded buffer reports
+overwrites rather than blocking. Use `status()` to inspect tracker/recording state.
+Closing a client alone does **not** stop the tracker; `stop()` is explicit.
+
+Coordinates are **uncalibrated source-image pixels**, positive x rightward and y
+downward. They are not screen coordinates or visual degrees. Invalid signals use
+NaN and lack the VALID flag. Feature loss is not labelled a blink automatically.
+The template correlation is NCC, not a calibrated pupil-confidence probability.
+No gaze calibration or neural eye-region detector is included in this first version.
+
+## Networking
+
+Defaults are local-machine only:
+
+| Purpose | Transport | Port |
+|---|---|---:|
+| Tracking samples | TCP, optionally UDP | 5556 |
+| Start/stop/status | TCP | 5557 |
+| Clock synchronization | TCP | 5558 |
+
+For separate computers: set tracker bind address to `0.0.0.0`, use its LAN IP in
+`Client(...)` or `python mx_eye_receiver.py --host TRACKER_IP`, and allow the
+configured ports through the local firewall. With UDP, also set the receiver's
+LAN IP in tracker Settings. UDP has one target; TCP accepts up to eight receivers.
+The SDK reads the configured transport from the status server when connecting.
+Reconnect clients after changing transport/ports. The protocol is unauthenticated
+and intended for a trusted lab network, not an exposed internet service.
+
+TCP uses fixed-size binary framing, disables Nagle, and never waits for slow
+receivers: a partial/blocked send disconnects that receiver, which reconnects.
+UDP can lose/reorder datagrams. Both include a session ID, sample sequence, and
+source-frame ID. The SDK rejects out-of-order samples, resets on a new session,
+and reports sequence gaps. Neither mode guarantees delivery of every sample.
+
+This is a new versioned `MXEY` protocol (104-byte packets), not wire-compatible
+with the older `eye_sender_switchable_v4.py` experiment. Use the included SDK.
+`app/protocol.py` specifies byte layout and flags.
+
+## Delay readouts
+
+| Readout | Definition |
+|---|---|
+| Processing | Tracking-end minus tracking-start, measured on tracker |
+| Acquisition → send | Send minus host read-return timestamp |
+| Network | Receiver receipt minus send, after clock-offset correction |
+| Arrival age | Receiver receipt minus acquisition, after correction |
+| Age now | Current receiver time minus acquisition, after correction |
+
+A dedicated server performs four-timestamp synchronization. The SDK takes eight
+probes, selects the lowest round-trip time, and repeats every 15 seconds. The
+estimate expires after 45 seconds without a successful sync. This works with
+separate monotonic clocks and does not assume identical boot times or wall clocks.
+
+One-way delay is an **estimate**: asymmetric network paths and clock drift are
+not observable exactly from this exchange. Half the minimum RTT indicates the
+scale of timing ambiguity under the symmetric-path model, not a calibrated
+confidence interval. Negative estimates are not silently clamped away.
+
+The acquisition timestamp is taken **immediately after OpenCV returns a frame**.
+Exposure, USB transfer, and buffering before that point are excluded. The
+application cannot measure true eye-motion-to-task latency with this camera API.
+A hardware-timestamped camera/backend would be needed to improve that boundary.
+
+## Provenance
+
+- Tracking extracted from `mxbi_pupil_cr_tracker_video_v13.py`: original threshold,
+  connected-component/ellipse, continuity, pair geometry and reacquisition logic.
+- A 500-frame synthetic comparison against v13 produced identical pupil/CR
+  detections, including loss and reacquisition. Template center arithmetic was
+  corrected to use the pixel center consistently; display work was removed from
+  the tracking path.
+- Transport design follows the earlier v4 TCP/UDP and clock-sync experiments;
+  production code uses standard sockets rather than ZeroMQ.
+- No physical-camera or real-marmoset-video validation was possible in this session.
+
+The GUI and SDK still need a run with your camera and video on the target machine.
+
+Reference documentation: [Python multiprocessing](https://docs.python.org/3/library/multiprocessing.html),
+[OpenCV camera/video I/O](https://docs.opencv.org/4.x/d8/dfe/classcv_1_1VideoCapture.html),
+[OpenCV VideoWriter](https://docs.opencv.org/4.x/dd/d9e/classcv_1_1VideoWriter.html),
+[Qt threads](https://doc.qt.io/qtforpython-6/PySide6/QtCore/QThread.html).

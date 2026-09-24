@@ -1,0 +1,59 @@
+{
+  "format": "mx-eye",
+  "version": 1,
+  "source": {
+    "mode": "camera",
+    "camera": 0,
+    "path": "",
+    "width": 640,
+    "height": 480,
+    "fps": 120.0,
+    "backend": "auto",
+    "fourcc": "MJPG",
+    "speed": 1.0
+  },
+  "tracking": {
+    "pupil_thr": 48,
+    "pupil_min": 30,
+    "pupil_max": 3000,
+    "cr_thr": 181,
+    "cr_min": 2,
+    "cr_max": 120,
+    "pupil_gate": 7,
+    "cr_gate": 2,
+    "max_pair_dist": 10,
+    "max_pair_vec_change": 4,
+    "reacquire_after_frames": 4,
+    "template_radius": 35,
+    "template_search_size": 520,
+    "template_min_corr": 0.6,
+    "tracking_mode": "Pupil + CR",
+    "template_tracking": false,
+    "roi": [
+      0,
+      0,
+      320,
+      240
+    ]
+  },
+  "network": {
+    "bind": "127.0.0.1",
+    "data_port": 5556,
+    "control_port": 5557,
+    "sync_port": 5558,
+    "transport": "tcp",
+    "udp_host": "127.0.0.1"
+  },
+  "recording": {
+    "directory": "recordings",
+    "buffer_mb": 128,
+    "codec": "MJPG",
+    "record_simulation": false
+  },
+  "display": {
+    "hz": 25,
+    "masks": true,
+    "crosshairs": true
+  },
+  "template": null
+}
