@@ -10,7 +10,7 @@ gui = ['numpy>=1.24,<3', 'opencv-python-headless>=4.8,<5', 'psutil>=5.9,<8', 'Py
 test = ['pytest>=8,<10']
 
 [project.scripts]
-mx-eye = 'mx_eye.gui:main'
+mx-eye = 'mx_eye.__main__:main'
 mx-eye-receiver = 'mx_eye.receiver:main'
 
 [build-system]
