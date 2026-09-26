@@ -367,7 +367,7 @@ class Window(W.QMainWindow):
             self.source_label.setText(path)
             self.full.reset_zoom()
             self.pending_video_path=path
-            if self.service.run and self.service.snapshot()['state']!='stopping':
+            if self.service.run and self.service.snapshot().state!='stopping':
                 self.call('stop')
 
     def start(self):
@@ -535,14 +535,14 @@ class Window(W.QMainWindow):
         self.source_label.setText(self.saved_source_path if mode=='Video' else
             ('Artificial eye · no camera required' if mode=='Simulation' else
              'Live camera · full video is recorded during each session'))
-        if mode=='Camera' and state['source'].get('width'):
-            info=state['source']
+        if mode=='Camera' and state.source.get('width'):
+            info=state.source
             name=self.service.config['source'].get('camera_name') or f"Camera {self.camera.value()}"
             camera_mode=f"{info['width']} × {info['height']} · {info.get('actual_format','unknown format')}"
             if info.get('driver_fps') is not None:
                 camera_mode+=f" · driver {info['driver_fps']:g} fps"
             self.source_label.setText(f"{name} · {camera_mode} · full video is recorded")
-        active=state['state'] in ('running','starting','stopping')
+        active=state.state in ('running','starting','stopping')
         for widget in (self.start_button,self.source,self.settings_button,self.camera_settings_button,self.camera):
             widget.setEnabled(not active and not self.pending)
         self.open_button.setEnabled(not self.pending and not self._closing)
@@ -555,25 +555,25 @@ class Window(W.QMainWindow):
             self.full.setEnabled(True)
             self.eye.setEnabled(True)
         self.coordinates.setEnabled(self.mode.currentText()=='Pupil only')
-        self.speed.setEnabled(mode=='Video' and state['state']!='stopping')
+        self.speed.setEnabled(mode=='Video' and state.state!='stopping')
         for widget in (self.pause,self.back,self.step,self.timeline): widget.setEnabled(video)
         self.pause.setEnabled(video and self.navigation_pending is None)
         if video and not self.pending and self.navigation_pending is None:
-            with C.QSignalBlocker(self.pause): self.pause.setChecked(state['paused'])
-            self.pause.setText('Play' if state['paused'] else 'Pause')
+            with C.QSignalBlocker(self.pause): self.pause.setChecked(state.paused)
+            self.pause.setText('Play' if state.paused else 'Pause')
         if not video and self.pause.isChecked():
             with C.QSignalBlocker(self.pause): self.pause.setChecked(False)
             self.pause.setText('Pause')
         if not video: self.pause.setText('Play/Pause')
-        self.status.setText(f"{state['state'].upper()}  ·  {state['message']}"+(f"   {state['directory']}" if state['directory'] else ''))
+        self.status.setText(f"{state.state.upper()}  ·  {state.message}"+(f"   {state.directory}" if state.directory else ''))
         if video and self.navigation_pending is not None:
             self.status.setText('Seeking video frame…')
-        stats=state['stats']
-        if state['session']!=self.last_session:
+        stats=state.stats
+        if state.session!=self.last_session:
             self.history.clear()
             self.last_payload=None
             self.last_history_frame=None
-            self.last_session=state['session']
+            self.last_session=state.session
             self.rate_last=(time.monotonic(),0,0)
         now=time.monotonic()
         last,a,t=self.rate_last
@@ -581,11 +581,11 @@ class Window(W.QMainWindow):
             self.rates=((stats.get('acquired',0)-a)/(now-last),(stats.get('tracked',0)-t)/(now-last))
             self.rate_last=(now,stats.get('acquired',0),stats.get('tracked',0))
         backlog=int(stats.get('enqueued',0)-stats.get('written',0))
-        recording='FAULT — INCOMPLETE' if stats.get('record_fault') else (f"{int(stats.get('written',0))} frames · buffer {backlog}" if state['directory'] else 'off')
+        recording='FAULT — INCOMPLETE' if stats.get('record_fault') else (f"{int(stats.get('written',0))} frames · buffer {backlog}" if state.directory else 'off')
         if stats.get('log_fault'): recording+=' · LOG INCOMPLETE'
         self.metrics.setText(f'ACQ  {self.rates[0]:.1f} fps     TRACK  {self.rates[1]:.1f} fps     PROC  {stats.get("processing_us",0)/1000:.2f} ms     SKIPPED  {int(stats.get("tracking_skips",0))}     VIDEO  {recording}')
         self.metrics.setStyleSheet('color:#ff817f;' if stats.get('record_fault') or stats.get('log_fault') else '')
-        self.timeline.setMaximum(max(1,state['source'].get('total',1)-1))
+        self.timeline.setMaximum(max(1,state.source.get('total',1)-1))
         payload=self.service.preview()
         fresh_payload=payload is not None
         if payload:

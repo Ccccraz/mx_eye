@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 import psutil
 
-from .protocol import PACKET, MAGIC, VERSION, VALID, PUPIL, CR, PUPIL_ONLY, SIMULATION, ROI_RELATIVE
+from mx_eye_protocol.packets import PUPIL, CR, PUPIL_ONLY, SIMULATION, ROI_RELATIVE, VALID, Packet, encode
 from .tracking import Tracker
 from .video import VideoReader
 from .transport import Publisher
@@ -389,22 +389,28 @@ def tracking_worker(config, session, mailbox, commands, preview, samples,
                     flags |= ROI_RELATIVE
                 flags |= SIMULATION if config['source']['mode'] == 'simulation' else 0
                 send = time.perf_counter_ns()
-                values = (session,seq,frame_id,acquired,start,end,send,media,
-                          result['x'],result['y'],pupil['x'] if pupil else nan,
-                          pupil['y'] if pupil else nan,cr['x'] if cr else nan,
-                          cr['y'] if cr else nan,pupil['area'] if pupil else nan,
-                          result['template_score'])
-                packet = PACKET.pack(MAGIC,VERSION,flags,0,*values)
+                packet = Packet(session=session,sequence=seq,frame=frame_id,
+                                acquisition_ns=acquired,tracking_start_ns=start,
+                                tracking_end_ns=end,send_ns=send,media_ns=media,
+                                x=result['x'],y=result['y'],
+                                pupil_x=pupil['x'] if pupil else nan,
+                                pupil_y=pupil['y'] if pupil else nan,
+                                cr_x=cr['x'] if cr else nan,
+                                cr_y=cr['y'] if cr else nan,
+                                pupil_area=pupil['area'] if pupil else nan,
+                                template_ncc=result['template_score'],
+                                flags=flags)
+                data = encode(packet)
                 try:
                     if pub is not None:
-                        stats['send_errors'].value += pub.send(packet)
+                        stats['send_errors'].value += pub.send(data)
                     else:
-                        udp.sendto(packet, destination)
+                        udp.sendto(data, destination)
                 except (BlockingIOError, OSError):
                     stats['send_errors'].value += 1
                 if samples is not None:
                     try:
-                        samples.put_nowait((*values, flags))
+                        samples.put_nowait((*packet.body(), packet.flags))
                     except queue.Full:
                         if not stats['log_fault'].value:
                             report(events, 'record_error', message='Tracking log buffer overflow; log is incomplete. Tracking and video continue.')
