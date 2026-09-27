@@ -18,6 +18,8 @@ from .config import (
     TrackingMode,
     TrackingParameters,
     Transport,
+    configure,
+    store,
 )
 
 __all__ = [
@@ -38,4 +40,6 @@ __all__ = [
     "TrackingMode",
     "TrackingParameters",
     "Transport",
+    "configure",
+    "store",
 ]

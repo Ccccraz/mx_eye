@@ -138,3 +138,28 @@ def test_save_and_load_round_trip(tmp_path):
     assert cfg.MxEyeConfigStore.load(path).value == original.value
     assert config.value == original.value
     assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_shared_store_is_a_process_singleton():
+    shared = cfg.store()
+
+    assert shared is cfg.store()
+    shared.value.source.mode = cfg.SourceMode.SIMULATION
+    assert cfg.store().value.source.mode is cfg.SourceMode.SIMULATION
+
+    assert cfg.configure() is shared
+    assert cfg.store().value.source.mode is cfg.SourceMode.CAMERA
+
+
+def test_configure_loads_a_file_into_the_shared_store(tmp_path):
+    path = tmp_path / "shared.json"
+    path.write_text(json.dumps({"source": {"mode": "simulation"}}), encoding="utf-8")
+
+    shared = cfg.store()
+
+    assert cfg.configure(path) is shared
+    assert cfg.store().value.source.mode is cfg.SourceMode.SIMULATION
+    assert cfg.store().value.source.width == 640
+
+    cfg.configure()
+    assert cfg.store().value.source.mode is cfg.SourceMode.CAMERA

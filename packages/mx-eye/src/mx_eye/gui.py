@@ -110,8 +110,9 @@ class Settings(W.QDialog):
         super().done(result)
 
 class Window(W.QMainWindow):
-    def __init__(self,config):
+    def __init__(self):
         super().__init__()
+        config=cfg.store()
         self.setWindowTitle('mx_eye · MXBI eye tracker')
         self.resize(1350,870)
         self.setMinimumSize(980,650)

@@ -25,8 +25,8 @@ STAT_NAMES = ('acquired','tracked','written','enqueued','tracking_skips','mailbo
               'source_fps','source_index','processing_us')
 
 class Service:
-    def __init__(self, config):
-        self.config = MxEyeConfigStore(config.value.model_copy(deep=True))
+    def __init__(self, config: MxEyeConfigStore):
+        self.config = config
         self.ctx = mp.get_context('spawn')
         self._lock = threading.RLock()
         self._requests = queue.Queue()
@@ -148,6 +148,7 @@ class Service:
             if self.state == 'running':
                 return self.snapshot()  # idempotent START
             raise RuntimeError('Wait until the previous recording has finished draining.')
+        # Each worker process gets its own snapshot of the shared store.
         config = MxEyeConfigStore(self.config.value.model_copy(deep=True))
         if self._server_errors:
             raise RuntimeError('; '.join(self._server_errors))
@@ -322,7 +323,7 @@ class Service:
                 raise RuntimeError('Stop the session before changing source/network/recording settings.')
             updated = MxEyeConfigStore(args['config'].value.model_copy(deep=True))
             network_changed = updated.value.network != self.config.value.network
-            self.config = updated
+            self.config.replace(updated.value)
             if network_changed:
                 self._servers_stop.set()
                 for t in self._threads:
@@ -336,11 +337,11 @@ class Service:
         if command == 'config':
             check = MxEyeConfigStore(self.config.value.model_copy(deep=True))
             check.value.tracking = args['tracking'].model_copy(deep=True)
-            self.config = check
+            self.config.replace(check.value)
         if command == 'speed':
             check = MxEyeConfigStore(self.config.value.model_copy(deep=True))
             check.value.source.speed = args['speed']
-            self.config = check
+            self.config.replace(check.value)
             if self.run and self.config.value.source.mode is SourceMode.VIDEO:
                 self.run['capture_commands'].put_nowait(dict(command='speed',speed=args['speed']))
             return self.snapshot()

@@ -164,6 +164,10 @@ class MxEyeConfigStore:
     def value(self) -> MxEyeConfigModel:
         return self._config
 
+    def replace(self, value: MxEyeConfigModel) -> None:
+        """Adopt another model so a shared store keeps its identity."""
+        self._config = value.model_copy(deep=True)
+
     @classmethod
     def defaults(cls) -> Self:
         return cls()
@@ -193,3 +197,25 @@ class MxEyeConfigStore:
             encoding="utf-8",
         )
         temp.replace(path)
+
+
+_shared: MxEyeConfigStore | None = None
+
+
+def store() -> MxEyeConfigStore:
+    """The process-wide store shared by the GUI and the service.
+
+    Worker processes receive a per-session copy instead; a module-level
+    singleton cannot cross a process boundary.
+    """
+    global _shared
+    if _shared is None:
+        _shared = MxEyeConfigStore()
+    return _shared
+
+
+def configure(path: Path | None = None) -> MxEyeConfigStore:
+    """Load a configuration file, or the defaults, into the shared store."""
+    value = MxEyeConfigStore.load(path).value if path else MxEyeConfigModel()
+    store().replace(value)
+    return store()

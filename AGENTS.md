@@ -80,7 +80,9 @@ and provenance. The workspace members live in `packages/mx-eye`,
   `packages/mx-eye/src/mx_eye/config/`: unknown keys, wrong types and
   out-of-range values are refused on load, on save and on live assignment, while
   absent groups and keys fall back to the defaults. Saving writes the file
-  atomically and omits unset display switches.
+  atomically and omits unset display switches. The GUI resolves the single
+  process-wide store from `config.store()` and injects it into the service, while
+  every worker process receives a per-session copy.
 - **Load/Save template:** visible top-row buttons import an image or export PNG.
 
 Camera index 0 is usually the first camera. On Windows, Auto chooses DirectShow;
