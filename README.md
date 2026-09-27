@@ -1,7 +1,7 @@
 # mx_eye
 
 First integrated MXBI pupil / corneal-reflection tracker, with a separate receiver SDK and client.
-Python 3.10+; desktop UI for Windows/Linux.
+Python 3.11+; desktop UI for Windows/Linux.
 
 The repository is a uv workspace with four packages: `mx-eye` (the tracker),
 `mx-eye-client` (the remote client), `py-mx-eye` (the Python SDK) and
@@ -45,7 +45,7 @@ with Client("127.0.0.1") as eye:
     # Inside your behavioral-task loop:
     sample = eye.latest(max_age_ms=50)
     if sample is not None:
-        x, y = sample.x, sample.y
+        x, y = sample.frame.payload.x, sample.frame.payload.y
     # At the end of the session:
     eye.stop()
 ```

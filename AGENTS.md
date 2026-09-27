@@ -24,7 +24,7 @@ and provenance. The workspace members live in `packages/mx-eye`,
   transmitted and recorded X/Y. Pupil + CR remains pupil minus CR. A moving ROI
   changes the relative origin; this is not calibrated gaze or full head-motion
   compensation. Raw pupil_x/pupil_y remain absolute. The SDK exposes
-  `sample.coordinate_system`; packet/CSV flag bit 32 marks ROI-relative output.
+  `sample.frame.payload.coordinate_system`; packet/CSV flag bit 32 marks ROI-relative output.
 - **Video navigation:** Left/Right arrows pause and step one frame backward/forward.
   Parameter editors keep their normal arrow-key behavior. Click anywhere on the
   timeline to seek immediately, or drag and release. Play/Pause changes its label
@@ -176,8 +176,7 @@ No gaze calibration or neural eye-region detector is included in this first vers
 
 The SDK is the `py-mx-eye` workspace member; it is not published to PyPI yet, so use it
 from a checkout (`uv sync --all-extras`) or install the wheels built by `uv build` for
-`py-mx-eye` and `mx-eye-protocol`. It depends only on the standard library and
-`mx-eye-protocol`, and never loads Qt or OpenCV.
+`py-mx-eye` and `mx-eye-protocol`. It uses `mx-eye-protocol` and its Pydantic JSON models, and never loads Qt or OpenCV.
 
 ## Networking
 
@@ -186,8 +185,7 @@ Defaults are local-machine only:
 | Purpose | Transport | Port |
 |---|---|---:|
 | Tracking samples | TCP, optionally UDP | 5556 |
-| Start/stop/status | TCP | 5557 |
-| Clock synchronization | TCP | 5558 |
+| Start/stop/status and clock synchronization | TCP | 5557 |
 
 For separate computers: set tracker bind address to `0.0.0.0`, use its LAN IP in
 `Client(...)` or `uv run mx-eye-receiver --host TRACKER_IP`, and allow the
@@ -199,15 +197,64 @@ instead of being resolved at run time.
 Reconnect clients after changing transport/ports. The protocol is unauthenticated
 and intended for a trusted lab network, not an exposed internet service.
 
-TCP uses fixed-size binary framing, disables Nagle, and never waits for slow
+Sample TCP uses length-prefixed binary framing, disables Nagle, and never waits for slow
 receivers: a partial/blocked send disconnects that receiver, which reconnects.
 UDP can lose/reorder datagrams. Both include a session ID, sample sequence, and
 source-frame ID. The SDK rejects out-of-order samples, resets on a new session,
 and reports sequence gaps. Neither mode guarantees delivery of every sample.
 
-This is a new versioned `MXEY` protocol (104-byte packets), not wire-compatible
-with the older `eye_sender_switchable_v4.py` experiment. Use the included SDK.
-`packages/protocol/src/mx_eye_protocol/packets.py` specifies byte layout and flags.
+The sample frame header is little-endian `<4sBI`: magic `MXEY`, message type
+(`DATA=1`, `CMD=2`), and uint32 encoded payload length (excluding the header).
+DATA carries a 97-byte `<7Qq8fB` TrackingPayload; the full frame is 106 bytes.
+It replaces the old 104-byte v1 protocol and is not compatible with the earlier
+`eye_sender_switchable_v4.py` experiment. Update tracker and SDK together.
+TCP validates the header before buffering the declared payload and disconnects
+on malformed headers; UDP drops malformed datagrams. Only DATA is implemented;
+The binary CMD type is reserved. All commands, including sync, use newline-delimited
+JSON on the single control port. The TCP server handles concurrent connections,
+each with one request and one response followed by connection closure.
+Request, Reply and nested status fields are Pydantic models. Command, Transport
+and SourceMode use StrEnum with auto(); configuration reuses the same enums.
+The control protocol version is the SemVer string `1.0.0`; other versions,
+including legacy integers, are rejected. Packages require Python 3.11 or newer.
+Replies contain either a nested status, sync timestamps, or an error.
+SDK start/stop/status return StatusSnapshot with field access such as
+`status.network.transport` and `status.stats.tracked`.
+Remove legacy `sync_port` configuration/client arguments and `--sync-port`;
+old flat status responses are no longer supported. Update both endpoints together.
+
+`packages/protocol/src/mx_eye_protocol/data_frame.py` defines TrackingPayload,
+DataFrame and flags. DataFrame contains magic, message_type, length and payload;
+DataFrame owns the shared binary layout and exposes `from_payload()`, `encode()`
+and the `frame_size` property. Encoding does not validate the header.
+`DataFrame.header_size` is the stream header length. The SDK implements decoding
+and incoming-header validation in `py_mx_eye/_decoder.py`.
+The SDK Sample contains the complete frame plus reception and clock synchronization
+information. Use `sample.frame.payload` to access tracking fields.
+Recording queues carry TrackingPayload objects; the recording layer maps them to
+the unchanged CSV columns without binary float32 conversion.
+
+TrackingPayload flags use TrackingFlags (IntFlag); combine members with `|`.
+`TrackingFlags.NONE` means no flags. The former Packet type and flat Sample
+sampling attributes have been removed. Use `sample.frame.length` for encoded
+payload size and `sample.age_ms` for reception timing.
+TCP reception handles split and coalesced frames, rejecting unknown message
+types, reserved CMD frames and invalid DATA lengths before buffering their bodies.
+UDP uses the same binary envelope. Control JSON does not use that envelope.
+Enum values remain lowercase strings in JSON. Successful replies contain
+`ok: true` and either `status` or `sync`; failures contain `ok: false` and `error`.
+For example, a status request is `{"command":"status","protocol":"1.0.0"}`
+followed by a newline.
+
+## Type checking
+
+`mx-eye-protocol` ships inline type annotations and a PEP 561 `py.typed` marker
+in both wheels and source distributions. After installing workspace development
+dependencies, run `uv run pyright` from the repository root. Strict checking covers
+`packages/protocol/src/mx_eye_protocol` and targets Python 3.11; other workspace
+packages are outside this check. Use
+`uv run pyright --verifytypes mx_eye_protocol --ignoreexternal` to check public
+API type completeness without evaluating external dependencies.
 
 ## Delay readouts
 
@@ -219,7 +266,7 @@ with the older `eye_sender_switchable_v4.py` experiment. Use the included SDK.
 | Arrival age | Receiver receipt minus acquisition, after correction |
 | Age now | Current receiver time minus acquisition, after correction |
 
-A dedicated server performs four-timestamp synchronization. The SDK takes eight
+The command server performs four-timestamp synchronization on the same port. The SDK takes eight
 probes, selects the lowest round-trip time, and repeats every 15 seconds. The
 estimate expires after 45 seconds without a successful sync. This works with
 separate monotonic clocks and does not assume identical boot times or wall clocks.
@@ -252,4 +299,3 @@ Reference documentation: [Python multiprocessing](https://docs.python.org/3/libr
 [OpenCV camera/video I/O](https://docs.opencv.org/4.x/d8/dfe/classcv_1_1VideoCapture.html),
 [OpenCV VideoWriter](https://docs.opencv.org/4.x/dd/d9e/classcv_1_1VideoWriter.html),
 [Qt threads](https://doc.qt.io/qtforpython-6/PySide6/QtCore/QThread.html).
-
