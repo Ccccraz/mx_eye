@@ -192,6 +192,8 @@ For separate computers: set tracker bind address to `0.0.0.0`, use its LAN IP in
 configured ports through the local firewall. With UDP, also set the receiver's
 LAN IP in tracker Settings. UDP has one target; TCP accepts up to eight receivers.
 The SDK reads the configured transport from the status server when connecting.
+Both address fields are validated as IPv4 literals, so hostnames are rejected
+instead of being resolved at run time.
 Reconnect clients after changing transport/ports. The protocol is unauthenticated
 and intended for a trusted lab network, not an exposed internet service.
 

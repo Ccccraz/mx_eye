@@ -3,6 +3,7 @@
 
 import json
 from enum import StrEnum, auto
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Literal, Self
 
@@ -106,12 +107,12 @@ class TrackingConfig(TrackingParameters):
 
 
 class NetworkConfig(ConfigModel):
-    bind: str = "127.0.0.1"
+    bind: IPv4Address = IPv4Address("127.0.0.1")
     data_port: int = Field(default=5556, ge=1024, le=65535)
     control_port: int = Field(default=5557, ge=1024, le=65535)
     sync_port: int = Field(default=5558, ge=1024, le=65535)
     transport: Transport = Transport.TCP
-    udp_host: str = "127.0.0.1"
+    udp_host: IPv4Address = IPv4Address("127.0.0.1")
 
     @model_validator(mode="after")
     def validate_distinct_ports(self) -> "NetworkConfig":

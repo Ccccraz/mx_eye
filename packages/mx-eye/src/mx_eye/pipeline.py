@@ -321,7 +321,7 @@ def tracking_worker(config, session, mailbox, commands, preview, samples,
         else:
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp.setblocking(False)
-            destination = (socket.gethostbyname(net.udp_host), net.data_port)
+            destination = (str(net.udp_host), net.data_port)
         report(events, 'tracking_ready')
         while True:
             changed = False
