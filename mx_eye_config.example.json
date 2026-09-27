@@ -19,21 +19,22 @@
     "cr_thr": 181,
     "cr_min": 2,
     "cr_max": 120,
-    "pupil_gate": 7,
-    "cr_gate": 2,
-    "max_pair_dist": 10,
-    "max_pair_vec_change": 4,
+    "pupil_gate": 7.0,
+    "cr_gate": 2.0,
+    "max_pair_dist": 10.0,
+    "max_pair_vec_change": 4.0,
     "reacquire_after_frames": 4,
     "template_radius": 35,
     "template_search_size": 520,
     "template_min_corr": 0.6,
     "tracking_mode": "Pupil + CR",
+    "pupil_coordinates": "absolute",
     "template_tracking": false,
     "roi": [
-      0,
-      0,
-      320,
-      240
+      0.0,
+      0.0,
+      320.0,
+      240.0
     ]
   },
   "network": {
@@ -51,7 +52,7 @@
     "record_simulation": false
   },
   "display": {
-    "hz": 25,
+    "hz": 25.0,
     "masks": true,
     "crosshairs": true
   },
