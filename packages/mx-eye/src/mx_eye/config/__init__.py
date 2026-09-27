@@ -1,27 +1,41 @@
 """Typed configuration models and file helpers."""
 
 from .config import (
+    CameraBackend,
+    ConfigFormat,
     ConfigModel,
     DisplayConfig,
     MxEyeConfigModel,
     MxEyeConfigStore,
     NetworkConfig,
+    PupilCoordinates,
+    RecordingCodec,
     RecordingConfig,
     SourceConfig,
     SourceMode,
     TemplateConfig,
     TrackingConfig,
+    TrackingMode,
+    TrackingParameters,
+    Transport,
 )
 
 __all__ = [
+    "CameraBackend",
+    "ConfigFormat",
     "ConfigModel",
     "DisplayConfig",
     "MxEyeConfigModel",
     "MxEyeConfigStore",
     "NetworkConfig",
+    "PupilCoordinates",
+    "RecordingCodec",
     "RecordingConfig",
     "SourceConfig",
     "SourceMode",
     "TemplateConfig",
     "TrackingConfig",
+    "TrackingMode",
+    "TrackingParameters",
+    "Transport",
 ]

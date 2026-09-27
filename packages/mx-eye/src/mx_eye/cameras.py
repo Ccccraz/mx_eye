@@ -5,6 +5,8 @@ import sys
 import time
 from PySide6 import QtCore as C, QtWidgets as W
 
+from .config import CameraBackend, SourceConfig
+
 
 def discover_cameras(output):
     try:
@@ -44,7 +46,7 @@ def discover_cameras(output):
 class CameraControls(W.QWidget):
     def __init__(self,source,parent=None):
         super().__init__(parent)
-        self.source=dict(source)
+        self.source=source.model_copy(deep=True)
         self.cameras=[]
         self.process=None
         self.output=None
@@ -52,13 +54,13 @@ class CameraControls(W.QWidget):
         form.setContentsMargins(0,0,0,0)
         row=W.QHBoxLayout()
         self.camera=W.QComboBox()
-        self.camera.addItem(f"Camera {source['camera']} (saved index)",source['camera'])
+        self.camera.addItem(f"Camera {source.camera} (saved index)",source.camera)
         self.refresh=W.QPushButton('Refresh')
         row.addWidget(self.camera,1)
         row.addWidget(self.refresh)
         form.addRow('Detected camera',row)
         self.resolution=W.QComboBox()
-        self.resolution.addItem(f"{source['width']} × {source['height']} (saved)",(source['width'],source['height']))
+        self.resolution.addItem(f"{source.width} × {source.height} (saved)",(source.width,source.height))
         form.addRow('Resolution',self.resolution)
         self.format=W.QComboBox()
         form.addRow('Camera format',self.format)
@@ -67,22 +69,22 @@ class CameraControls(W.QWidget):
         form.addRow(self.info)
         self.fps=W.QDoubleSpinBox()
         self.fps.setRange(1,1000)
-        self.fps.setValue(source['fps'])
+        self.fps.setValue(source.fps)
         form.addRow('Requested FPS',self.fps)
         self.manual=W.QGroupBox('Manual camera settings')
         manual=W.QFormLayout(self.manual)
         self.index=W.QSpinBox()
         self.index.setRange(0,99)
-        self.index.setValue(source['camera'])
+        self.index.setValue(source.camera)
         self.width=W.QSpinBox()
         self.height=W.QSpinBox()
         for widget,key in [(self.width,'width'),(self.height,'height')]:
             widget.setRange(32,16384)
-            widget.setValue(source[key])
+            widget.setValue(getattr(source,key))
         self.backend=W.QComboBox()
-        self.backend.addItems(['auto','dshow','msmf','v4l2'])
-        self.backend.setCurrentText(source['backend'])
-        self.fourcc=W.QLineEdit(source['fourcc'])
+        self.backend.addItems([backend.value for backend in CameraBackend])
+        self.backend.setCurrentText(source.backend.value)
+        self.fourcc=W.QLineEdit(source.fourcc)
         for text,widget in [('Index',self.index),('Width',self.width),('Height',self.height),('Backend',self.backend),('Format',self.fourcc)]:
             manual.addRow(text,widget)
         form.addRow(self.manual)
@@ -116,7 +118,7 @@ class CameraControls(W.QWidget):
             cameras,error=[],'Camera discovery did not finish. Close other camera apps and refresh, or use manual settings.'
         selected=self.camera.currentData()
         previous=next((item for item in self.cameras if item['index']==selected),None)
-        selected_name=previous['name'] if previous else self.source.get('camera_name','')
+        selected_name=previous['name'] if previous else ''
         selected_size=self.resolution.currentData()
         self.stop_scan()
         self.refresh.setEnabled(True)
@@ -145,7 +147,7 @@ class CameraControls(W.QWidget):
         camera=next((item for item in self.cameras if item['index']==self.camera.currentData()),None)
         if camera is None: return
         self.index.setValue(camera['index'])
-        self.backend.setCurrentText('dshow')
+        self.backend.setCurrentText(CameraBackend.DSHOW.value)
         usable=[m for m in camera['formats'] if len(m['fourcc'])==4]
         modes=usable or camera['formats']
         sizes=sorted({(m['width'],m['height']) for m in modes},key=lambda s:(s[0]*s[1],s[0]),reverse=True)
@@ -199,10 +201,17 @@ class CameraControls(W.QWidget):
         self.info.setText(f"{mode['width']} × {mode['height']} · {mode['fourcc']} · driver reports up to {mode['fps']:.1f} fps. Check measured ACQ after starting.")
 
     def values(self):
-        camera=next((item for item in self.cameras if item['index']==self.index.value()),None)
-        return dict(camera=self.index.value(),width=self.width.value(),height=self.height.value(),
-                    camera_name=camera['name'] if camera else '',
-                    fps=self.fps.value(),backend=self.backend.currentText(),fourcc=self.fourcc.text().strip())
+        return SourceConfig(
+            mode=self.source.mode,
+            camera=self.index.value(),
+            path=self.source.path,
+            width=self.width.value(),
+            height=self.height.value(),
+            fps=self.fps.value(),
+            backend=CameraBackend(self.backend.currentText()),
+            fourcc=self.fourcc.text().strip(),
+            speed=self.source.speed,
+        )
 
     def stop_scan(self):
         self.timer.stop()

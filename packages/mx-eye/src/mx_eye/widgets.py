@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 from PySide6 import QtCore as C, QtGui as G, QtWidgets as W
 
+from .config import TrackingMode
+
 STYLE = '''
 QWidget { background:#10151d; color:#dce6f1; font-family:Inter,Segoe UI,sans-serif; font-size:12px; }
 QMainWindow,QDialog { background:#10151d; }
@@ -209,8 +211,8 @@ class EyeView(W.QWidget):
         cr_mask=masks if cr_mask is None else cr_mask
         if (pupil_mask or cr_mask) and params:
             gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
-            for mask,color in [((gray<params['pupil_thr']) & pupil_mask,(245,135,65)),
-                               ((gray>params['cr_thr']) & cr_mask & (params['tracking_mode']!='Pupil only'),(80,80,245))]:
+            for mask,color in [((gray<params.pupil_thr) & pupil_mask,(245,135,65)),
+                               ((gray>params.cr_thr) & cr_mask & (params.tracking_mode is not TrackingMode.PUPIL_ONLY),(80,80,245))]:
                 frame[mask]=(frame[mask]*.4+np.array(color)*.6).astype(np.uint8)
         previous_size=self.image.size() if self.image is not None else None
         self.image=G.QImage(frame.data,frame.shape[1],frame.shape[0],frame.strides[0],G.QImage.Format_BGR888).copy()
@@ -221,7 +223,7 @@ class EyeView(W.QWidget):
         self.image_scale=scale
         self.crosshairs=crosshairs
         self.circle,self.inset=circle,inset
-        self.template_radius=(params or {}).get('template_radius',0)
+        self.template_radius=params.template_radius if params is not None else 0
         self.template_image=None
         if template is not None:
             gray=np.ascontiguousarray(template,dtype=np.uint8)

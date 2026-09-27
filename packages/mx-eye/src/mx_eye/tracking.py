@@ -7,7 +7,7 @@ import math
 from collections import deque
 import cv2
 import numpy as np
-from .config import TRACKING_DEFAULTS
+from .config import PupilCoordinates, TrackingConfig, TrackingMode
 
 class TrackState:
 
@@ -40,9 +40,8 @@ class TrackState:
 
 class Tracker:
     def __init__(self, config=None):
-        self.config = dict(TRACKING_DEFAULTS)
-        self.config.update(config or {})
-        self.roi = list(self.config.pop('roi', [0, 0, 320, 240]))
+        self.config = (config or TrackingConfig()).model_copy(deep=True)
+        self.roi = list(self.config.roi)
         self.current_frame = None
         self.frame_idx = 0
         self.pupil_state = TrackState()
@@ -67,11 +66,11 @@ class Tracker:
             self.track_template()
         pupil, cr, _ = self.detect_pupil_cr(advance_state=advance, frame_delta=frame_delta)
         self.last_pupil, self.last_cr = pupil, cr
-        pupil_only = self.config['tracking_mode'] == 'Pupil only'
+        pupil_only = self.config.tracking_mode is TrackingMode.PUPIL_ONLY
         valid = pupil is not None and (pupil_only or cr is not None)
         x = pupil['x'] - (0 if pupil_only else cr['x']) if valid else float('nan')
         y = pupil['y'] - (0 if pupil_only else cr['y']) if valid else float('nan')
-        if valid and pupil_only and self.config.get('pupil_coordinates','absolute') == 'relative':
+        if valid and pupil_only and self.config.pupil_coordinates is PupilCoordinates.RELATIVE:
             x -= self.roi[0]
             y -= self.roi[1]
         return dict(x=x, y=y, valid=valid, pupil=pupil, cr=cr,
@@ -121,21 +120,21 @@ class Tracker:
                 threshold = 0.5 * (center_med + ring_med)
             else:
                 threshold = float(np.percentile(patch, 20))
-            self.config['pupil_thr'] = int(round(np.clip(threshold, 0, 255)))
+            self.config.pupil_thr = int(round(np.clip(threshold, 0, 255)))
             self.pupil_state.clear()
             self.pupil_state.seed = (float(cx), float(cy))
             self.pair_lost_frames = 0
-            self.pick_status = f"Pupil seeded at ({cx},{cy}); threshold ≈ {self.config['pupil_thr']:.0f}"
+            self.pick_status = f"Pupil seeded at ({cx},{cy}); threshold ≈ {self.config.pupil_thr:.0f}"
         else:
             if center_med > ring_med:
                 threshold = 0.5 * (center_med + ring_med)
             else:
                 threshold = float(np.percentile(patch, 95))
-            self.config['cr_thr'] = int(round(np.clip(threshold, 0, 255)))
+            self.config.cr_thr = int(round(np.clip(threshold, 0, 255)))
             self.cr_state.clear()
             self.cr_state.seed = (float(cx), float(cy))
             self.pair_lost_frames = 0
-            self.pick_status = f"CR seeded at ({cx},{cy}); threshold ≈ {self.config['cr_thr']:.0f}"
+            self.pick_status = f"CR seeded at ({cx},{cy}); threshold ≈ {self.config.cr_thr:.0f}"
         self.last_valid_pair_vector = None
 
     def clear_feature_history(self):
@@ -149,7 +148,7 @@ class Tracker:
 
     def set_template(self, sx, sy):
         gray = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2GRAY)
-        r = max(6, int(round(self.config['template_radius'])))
+        r = max(6, int(round(self.config.template_radius)))
         cx = int(round(sx))
         cy = int(round(sy))
         if cx - r < 0 or cy - r < 0 or cx + r >= gray.shape[1] or (cy + r >= gray.shape[0]):
@@ -167,13 +166,13 @@ class Tracker:
             self.template_anchor = (cx, cy)
         self.template_last_center = (cx, cy)
         self.template_score = 1.0
-        self.config['template_tracking'] = True
+        self.config.template_tracking = True
         self.template_status = 'Tracking 1.00'
 
     def fixed_search_rect(self):
         if self.template_anchor is None or self.current_frame is None:
             return None
-        size = max(100, int(round(self.config['template_search_size'])))
+        size = max(100, int(round(self.config.template_search_size)))
         half = size // 2
         h, w = self.current_frame.shape[:2]
         cx, cy = self.template_anchor
@@ -186,7 +185,7 @@ class Tracker:
         return (x1, y1, x2, y2)
 
     def track_template(self):
-        if not self.config['template_tracking'] or self.template is None or self.template_last_center is None or (self.current_frame is None):
+        if not self.config.template_tracking or self.template is None or self.template_last_center is None or (self.current_frame is None):
             return
         gray = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2GRAY)
         rect = self.fixed_search_rect()
@@ -210,7 +209,7 @@ class Tracker:
         self.template_corr_map = result
         self.template_corr_origin = (center_x0, center_y0)
         self.template_corr_peak = (center_x0 + int(max_loc[0]), center_y0 + int(max_loc[1]))
-        min_corr = float(self.config['template_min_corr'])
+        min_corr = float(self.config.template_min_corr)
         if max_val < min_corr:
             self.template_status = f'LOST {max_val:.2f} < {min_corr:.2f}'
             return
@@ -233,7 +232,7 @@ class Tracker:
         self.template_corr_map = None
         self.template_corr_origin = None
         self.template_corr_peak = None
-        self.config['template_tracking'] = False
+        self.config.template_tracking = False
         self.template_status = 'No template'
 
     def component_candidates(self, mask, min_area, max_area, roi_x, roi_y, kind):
@@ -298,10 +297,10 @@ class Tracker:
         return score
 
     def choose_candidates(self, pupil_candidates, cr_candidates, reacquire=False):
-        p_gate = float(self.config['pupil_gate'])
-        c_gate = float(self.config['cr_gate'])
-        max_pair = float(self.config['max_pair_dist'])
-        max_vec_change = float(self.config['max_pair_vec_change'])
+        p_gate = float(self.config.pupil_gate)
+        c_gate = float(self.config.cr_gate)
+        max_pair = float(self.config.max_pair_dist)
+        max_vec_change = float(self.config.max_pair_vec_change)
         p_scored = []
         for cand in pupil_candidates:
             score = self.candidate_score(cand, self.pupil_state, p_gate, 'pupil', reacquire=reacquire)
@@ -365,14 +364,14 @@ class Tracker:
         if crop.size == 0:
             return (None, None, None)
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        pthr = int(round(self.config['pupil_thr']))
-        cthr = int(round(self.config['cr_thr']))
-        pmin = max(0, int(round(self.config['pupil_min'])))
-        pmax = max(pmin, int(round(self.config['pupil_max'])))
-        cmin = max(0, int(round(self.config['cr_min'])))
-        cmax = max(cmin, int(round(self.config['cr_max'])))
+        pthr = int(round(self.config.pupil_thr))
+        cthr = int(round(self.config.cr_thr))
+        pmin = max(0, int(round(self.config.pupil_min)))
+        pmax = max(pmin, int(round(self.config.pupil_max)))
+        cmin = max(0, int(round(self.config.cr_min)))
+        cmax = max(cmin, int(round(self.config.cr_max)))
         pupil_mask = np.where(gray < pthr, 255, 0).astype(np.uint8)
-        pupil_only = self.config['tracking_mode'] == 'Pupil only'
+        pupil_only = self.config.tracking_mode is TrackingMode.PUPIL_ONLY
         if pupil_only:
             cr_mask = np.zeros_like(gray, dtype=np.uint8)
         else:
@@ -381,12 +380,12 @@ class Tracker:
         cr_candidates = []
         if not pupil_only:
             cr_candidates = self.component_candidates(cr_mask, cmin, cmax, x, y, 'cr')
-        reacquire_n = max(1, int(round(self.config['reacquire_after_frames'])))
+        reacquire_n = max(1, int(round(self.config.reacquire_after_frames)))
         reacquire = self.pair_lost_frames >= reacquire_n
         if pupil_only:
             p_scored = []
             for cand in pupil_candidates:
-                score = self.candidate_score(cand, self.pupil_state, float(self.config['pupil_gate']), 'pupil', reacquire=reacquire)
+                score = self.candidate_score(cand, self.pupil_state, float(self.config.pupil_gate), 'pupil', reacquire=reacquire)
                 if score is not None:
                     p_scored.append((score, cand))
             p_scored.sort(key=lambda z: z[0])

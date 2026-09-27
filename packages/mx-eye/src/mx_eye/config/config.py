@@ -146,7 +146,7 @@ class TemplateConfig(ConfigModel):
 
 class MxEyeConfigModel(ConfigModel):
     format: ConfigFormat = ConfigFormat.MX_EYE
-    version: Literal[1] = 1
+    version: Literal["1.0.0"] = "1.0.0"
     source: SourceConfig = Field(default_factory=SourceConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
     network: NetworkConfig = Field(default_factory=NetworkConfig)
