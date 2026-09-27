@@ -51,6 +51,6 @@ with Client("127.0.0.1") as eye:
     eye.stop()
 ```
 
-在追踪与时钟同步就绪之前，`latest()` 返回 None；坐标是未标定的源图像像素。
+在追踪器产生第一个有效样本之前，`latest()` 返回 None；坐标是未标定的源图像像素。
 一个可运行的示例：`uv run python -m mx_eye_client.receive_minimal`。
 更多细节见 AGENTS.md。

@@ -52,6 +52,6 @@ with Client("127.0.0.1") as eye:
     eye.stop()
 ```
 
-`latest()` returns None until tracking and clock synchronization are ready, and
+`latest()` returns None until the tracker produces its first valid sample, and
 coordinates are uncalibrated source-image pixels. A runnable example:
 `uv run python -m mx_eye_client.receive_minimal`. More detail in AGENTS.md.

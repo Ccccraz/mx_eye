@@ -6,7 +6,6 @@ must not import Qt, OpenCV, or the tracker.
 """
 
 from .control import (
-    ClockSync,
     Command,
     NetworkStatus,
     Reply,
@@ -26,7 +25,6 @@ from .data_frame import (
 
 __version__ = "0.1.0"
 __all__ = [
-    "ClockSync",
     "Command",
     "DataFrame",
     "MessageType",

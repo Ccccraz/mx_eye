@@ -21,7 +21,7 @@ from mx_eye_protocol.data_frame import (
     TrackingPayload,
 )
 
-from .control import ClockState, Connector
+from .control import Connector
 from .sample import Sample
 
 
@@ -179,7 +179,6 @@ class SampleReceiver:
         port: int,
         udp_bind: str,
         max_samples: int,
-        clock_state: Callable[[], ClockState],
         now: Callable[[], int] = time.perf_counter_ns,
         connect: Connector = socket.create_connection,
         datagram: Callable[[int, int], socket.socket] = socket.socket,
@@ -187,7 +186,6 @@ class SampleReceiver:
         self.host = host
         self.port = port
         self.udp_bind = udp_bind
-        self._clock_state = clock_state
         self._now = now
         self._connect = connect
         self._datagram = datagram
@@ -355,14 +353,7 @@ class SampleReceiver:
                     0, frame - self._frame - (seq - self._sequence)
                 )
             self._sequence, self._frame = seq, frame
-            clock = self._clock_state()
-            sample = Sample(
-                frame=data_frame,
-                receive_ns=received,
-                clock_offset_ns=clock.offset_ns,
-                clock_valid_until_ns=clock.valid_until_ns,
-                sync_rtt_ms=clock.rtt_ms,
-            )
+            sample = Sample(frame=data_frame, receive_ns=received)
             if len(self._samples) == self._samples.maxlen:
                 self._counters.buffer_overwrites += 1
             self._samples.append(sample)

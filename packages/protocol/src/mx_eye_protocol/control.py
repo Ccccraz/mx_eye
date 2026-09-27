@@ -11,7 +11,6 @@ class Command(StrEnum):
     STATUS = auto()
     START = auto()
     STOP = auto()
-    SYNC = auto()
 
 
 class Transport(StrEnum):
@@ -87,37 +86,20 @@ class StatusSnapshot(ControlModel):
 class Request(ControlModel):
     command: Command
     protocol: Literal["1.0.0"] = "1.0.0"  # Supported control protocol SemVer.
-    t1: int | None = Field(default=None, strict=True, ge=0)  # Client send time, ns.
-
-    @model_validator(mode="after")
-    def validate_sync_timestamp(self) -> "Request":
-        if (self.command is Command.SYNC) != (self.t1 is not None):
-            raise ValueError("Only sync requests must carry t1")
-        return self
-
-
-class ClockSync(ControlModel):
-    """Four-timestamp synchronization; the client records t4 on receipt."""
-
-    t1: int = Field(strict=True, ge=0)  # Echo of the client monotonic send time, ns.
-    t2: int = Field(strict=True, ge=0)  # Server monotonic receive time, ns.
-    t3: int = Field(strict=True, ge=0)  # Server monotonic time before replying, ns.
 
 
 class Reply(ControlModel):
-    """One response: a status snapshot, clock timestamps, or an error."""
+    """One response: a status snapshot or an error."""
 
     ok: bool = True
     status: StatusSnapshot | None = None
-    sync: ClockSync | None = None
     error: str | None = None
 
     @model_validator(mode="after")
     def validate_result(self) -> "Reply":
-        results = int(self.status is not None) + int(self.sync is not None)
         if self.ok:
-            if results != 1 or self.error is not None:
+            if self.status is None or self.error is not None:
                 raise ValueError("A successful reply must contain exactly one result")
-        elif results or not self.error:
+        elif self.status is not None or not self.error:
             raise ValueError("A failed reply must contain only an error message")
         return self
