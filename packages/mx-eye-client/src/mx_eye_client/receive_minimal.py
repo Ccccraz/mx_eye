@@ -1,9 +1,9 @@
-"""Top-level SDK example: python examples/receive_minimal.py.
+"""Minimal SDK example: python -m mx_eye_client.receive_minimal.
 
-Install mx-eye first or run from an IDE with the project folder on sys.path.
+Run it against a tracker that is already serving samples.
 """
 import time
-from mx_eye import Client
+from py_mx_eye import Client
 
 TRACKER_IP = '127.0.0.1'
 

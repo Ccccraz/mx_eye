@@ -3,6 +3,7 @@
 Client receives continuously even when the caller is busy drawing. Cross-host
 age is estimated with a four-timestamp exchange, not by comparing raw clocks.
 """
+import json
 import math
 import socket
 import threading
@@ -10,8 +11,24 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-from .protocol import decode, VALID, PACKET, PUPIL_ONLY, ROI_RELATIVE
-from .transport import receive_json, send_json
+from mx_eye_protocol.control import CMD_START, CMD_STATUS, CMD_STOP, CMD_SYNC, Request, Reply
+from mx_eye_protocol.packets import PACKET, PUPIL_ONLY, ROI_RELATIVE, VALID, decode
+
+# Client-side copy of the framed-JSON control helpers; the tracker keeps its own
+# implementation in mx_eye/transport.py.
+def receive_json(sock):
+    data = bytearray()
+    while b'\n' not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise ConnectionError('Peer closed before replying')
+        data.extend(chunk)
+        if len(data) > 16384:
+            raise ValueError('Control message is too large')
+    return json.loads(data.split(b'\n',1)[0])
+
+def send_json(sock, obj):
+    sock.sendall(json.dumps(obj,allow_nan=False).encode('utf-8')+b'\n')
 
 @dataclass(frozen=True)
 class Sample:
@@ -36,6 +53,12 @@ class Sample:
     clock_offset_ns: float = math.nan  # server minus receiver
     clock_valid_until_ns: int = 0
     sync_rtt_ms: float = math.nan
+
+    @classmethod
+    def from_packet(cls, packet, receive_ns, clock_offset_ns=math.nan,
+                    clock_valid_until_ns=0, sync_rtt_ms=math.nan):
+        return cls(*packet.body(), packet.flags, receive_ns,
+                   clock_offset_ns, clock_valid_until_ns, sync_rtt_ms)
 
     @property
     def valid(self):
@@ -101,10 +124,10 @@ class Client:
         try:
             with socket.create_connection((self.host, port or self.control_port), timeout) as sock:
                 sock.settimeout(timeout)
-                send_json(sock, dict(request, protocol=1))
-                reply = receive_json(sock)
-                if not reply.get('ok'):
-                    raise RuntimeError(reply.get('error', 'Tracker rejected command'))
+                send_json(sock, request.to_dict())
+                reply = Reply.from_dict(receive_json(sock))
+                if not reply.ok:
+                    raise RuntimeError(reply.error or 'Tracker rejected command')
                 return reply
         except (socket.timeout, ConnectionError, OSError) as exc:
             raise TimeoutError(f'Tracker did not reply at {self.host}:{port or self.control_port}: {exc}') from exc
@@ -134,14 +157,14 @@ class Client:
 
     def start(self):
         self.connect()
-        return self._rpc({'command':'start'}, timeout=max(20,self.timeout))
+        return self._rpc(Request(CMD_START), timeout=max(20,self.timeout)).to_dict()
 
     def stop(self):
         """Stops acquisition; status() reports when video draining is complete."""
-        return self._rpc({'command':'stop'})
+        return self._rpc(Request(CMD_STOP)).to_dict()
 
     def status(self):
-        return self._rpc({'command':'status'})
+        return self._rpc(Request(CMD_STATUS)).to_dict()
 
     def latest(self, max_age_ms=50.0, require_valid=True):
         with self._lock:
@@ -213,13 +236,13 @@ class Client:
                         continue
                 received = time.perf_counter_ns()
                 try:
-                    p = decode(data)
+                    packet = decode(data)
                 except ValueError:
                     with self._lock:
                         self._stats['malformed'] += 1
                     continue
                 with self._lock:
-                    session, seq, frame = p[4:7]
+                    session, seq, frame = packet.session, packet.sequence, packet.frame
                     if session != self._session:
                         if session in self._old_sessions:
                             continue
@@ -237,7 +260,7 @@ class Client:
                         self._stats['acquisition_skips'] += max(0, frame-self._frame-(seq-self._sequence))
                     self._sequence, self._frame = seq, frame
                     offset, expiry, rtt = self._clock
-                    sample = Sample(*p[4:12], *p[12:20], p[2], received, offset, expiry, rtt)
+                    sample = Sample.from_packet(packet, received, offset, expiry, rtt)
                     if len(self._samples) == self._samples.maxlen:
                         self._stats['buffer_overwrites'] += 1
                     self._samples.append(sample)
@@ -262,11 +285,11 @@ class Client:
                     with socket.create_connection((self.host,self.sync_port),0.3) as sock:
                         sock.settimeout(0.3)
                         t1 = time.perf_counter_ns()
-                        send_json(sock, {'protocol':1,'command':'sync','t1':t1})
-                        reply = receive_json(sock)
+                        send_json(sock, Request(CMD_SYNC,t1=t1).to_dict())
+                        reply = Reply.from_dict(receive_json(sock))
                         t4 = time.perf_counter_ns()
-                        if reply.get('ok') and reply.get('t1') == t1:
-                            t2, t3 = int(reply['t2']), int(reply['t3'])
+                        if reply.ok and reply.t1 == t1 and reply.t2 is not None and reply.t3 is not None:
+                            t2, t3 = int(reply.t2), int(reply.t3)
                             rtt = (t4-t1)-(t3-t2)
                             if 0 <= rtt < 300_000_000:
                                 probes.append((rtt, ((t2-t1)+(t3-t4))/2))

@@ -15,6 +15,8 @@ import cv2
 import numpy as np
 import socket
 
+from mx_eye_protocol.control import (PROTOCOL_VERSION, CMD_START, CMD_STATUS, CMD_STOP,
+                                    CMD_SYNC, Request, Reply, StatusSnapshot)
 from .config import validate
 from .transport import listen, receive_json, send_json
 from .pipeline import Mailbox, FrameRing, PreviewMailbox, capture_worker, tracking_worker, writer_worker
@@ -67,11 +69,12 @@ class Service:
         with self._lock:
             run = self.run
             stats = {k:v.value for k,v in run['stats'].items()} if run else dict(self.last_stats)
-            return dict(ok=True,protocol=1,state=self.state,message=self.message,
-                        paused=bool(run and run['paused'].is_set()),
-                        session=self.session,stats=stats,directory=self.directory,
-                        network=dict(self.config['network']),source=dict(self.source_info),
-                        priority=list(self.priority_info),server_errors=list(self._server_errors))
+            return StatusSnapshot(state=self.state,message=self.message,
+                                  paused=bool(run and run['paused'].is_set()),
+                                  session=self.session,stats=stats,directory=self.directory,
+                                  network=dict(self.config['network']),source=dict(self.source_info),
+                                  priority=list(self.priority_info),
+                                  server_errors=list(self._server_errors))
 
     def preview(self):
         """GUI reads a local latest-value cache; it never reads a worker pipe."""
@@ -115,23 +118,22 @@ class Service:
                 with sock:
                     sock.settimeout(3)
                     try:
-                        req = receive_json(sock)
+                        req = Request.from_dict(receive_json(sock))
                         t2 = time.perf_counter_ns()
-                        if req.get('protocol') != 1:
+                        if req.protocol != PROTOCOL_VERSION:
                             raise ValueError('Unsupported protocol version')
-                        cmd = req.get('command')
-                        if kind == 'sync' and cmd == 'sync':
-                            reply = dict(ok=True,t1=req['t1'],t2=t2,t3=time.perf_counter_ns())
-                        elif kind == 'control' and cmd == 'status':
-                            reply = self.snapshot()
-                        elif kind == 'control' and cmd in ('start','stop'):
-                            reply = self.submit(cmd).result(timeout=15)
+                        if kind == 'sync' and req.command == CMD_SYNC:
+                            reply = Reply(t1=req.t1,t2=t2,t3=time.perf_counter_ns())
+                        elif kind == 'control' and req.command == CMD_STATUS:
+                            reply = Reply(status=self.snapshot())
+                        elif kind == 'control' and req.command in (CMD_START,CMD_STOP):
+                            reply = Reply(status=self.submit(req.command).result(timeout=15))
                         else:
                             raise ValueError('Unsupported command on this port')
                     except Exception as exc:
-                        reply = dict(ok=False,error=str(exc))
+                        reply = Reply(ok=False,error=str(exc))
                     try:
-                        send_json(sock,reply)
+                        send_json(sock,reply.to_dict())
                     except OSError:
                         pass
         except OSError as exc:
@@ -311,9 +313,9 @@ class Service:
             self.run = None
 
     def _execute(self, command, args):
-        if command == 'start':
+        if command == CMD_START:
             return self._start()
-        if command == 'stop':
+        if command == CMD_STOP:
             return self._stop()
         if command == 'settings':
             if self.run:
