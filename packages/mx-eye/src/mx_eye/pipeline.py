@@ -334,9 +334,7 @@ def capture_worker(
                         paused.set()
             else:
                 ok, frame = cap.read()
-            acquired = (
-                time.perf_counter_ns()
-            )  # Host read-return time, NOT sensor exposure.
+            acquired = time.time_ns()  # Host read-return time, NOT sensor exposure.
             if not ok:
                 if mode is SourceMode.CAMERA:
                     raise RuntimeError("Camera read failed or camera disconnected.")
@@ -496,14 +494,14 @@ def tracking_worker(
                 delta = max(1, fid - frame_id)
                 stats["tracking_skips"].value += max(0, delta - 1)
                 frame_id = fid
-            start = time.perf_counter_ns()
+            start = time.time_ns()
             result = core.process(
                 current,
                 frame_id,
                 advance=fresh is not None,
                 frame_delta=delta if fresh is not None else 1,
             )
-            end = time.perf_counter_ns()
+            end = time.time_ns()
             if fresh is not None:
                 seq += 1
                 pupil, cr = result["pupil"], result["cr"]
@@ -521,7 +519,7 @@ def tracking_worker(
                         flags |= TrackingFlags.ROI_RELATIVE
                 if config.value.source.mode is SourceMode.SIMULATION:
                     flags |= TrackingFlags.SIMULATION
-                send = time.perf_counter_ns()
+                send = time.time_ns()
                 payload = TrackingPayload(
                     session=session,
                     sequence=seq,
@@ -756,7 +754,7 @@ def writer_worker(
             tracking_log_complete=not bool(stats["log_fault"].value),
             recording_fault=int(stats["record_fault"].value),
             error=error,
-            timestamp_basis="host monotonic clock immediately after read(); not exposure time",
+            timestamp_basis="host wall clock (CLOCK_REALTIME) immediately after read(); NTP/PTP-shared; not exposure time",
             video_timing="constant nominal FPS; use frames.csv for measured frame times",
             camera_driver_drops="not observable through this UVC/OpenCV backend",
         )

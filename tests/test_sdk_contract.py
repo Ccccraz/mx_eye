@@ -10,8 +10,6 @@ from py_mx_eye import Client, Sample, Stats
 # Fields read by mx_eye_client.receiver.refresh().
 CONSUMER_STATS_FIELDS = {
     "received",
-    "clock_synced",
-    "sync_rtt_ms",
     "sequence_gaps",
     "acquisition_skips",
     "buffer_overwrites",
@@ -66,23 +64,14 @@ def test_stats_model_covers_the_consumer():
         "out_of_order",
     }
     assert stats.error == ""
-    assert stats.clock_synced is False
-    # NaN is a legitimate value before the first synchronization.
-    assert stats.sync_rtt_ms != stats.sync_rtt_ms
 
 
 def test_sample_surface():
-    assert set(Sample.__dataclass_fields__) == {
-        "frame",
-        "receive_ns",
-        "clock_offset_ns",
-        "clock_valid_until_ns",
-        "sync_rtt_ms",
-    }
+    assert set(Sample.__dataclass_fields__) == {"frame", "receive_ns"}
     assert Sample.__dataclass_params__.frozen
-    for name in ("clock_valid", "network_ms", "arrival_age_ms", "age_ms"):
+    for name in ("network_ms", "arrival_age_ms", "age_ms"):
         assert isinstance(getattr(Sample, name), property)
-    for name in ("clock_valid_at", "age_ms_at", "is_fresh_at"):
+    for name in ("age_ms_at", "is_fresh_at"):
         assert callable(getattr(Sample, name))
 
 

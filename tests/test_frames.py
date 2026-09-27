@@ -5,7 +5,6 @@ import io
 import math
 import multiprocessing
 import struct
-import time
 from dataclasses import replace
 
 import pytest
@@ -176,41 +175,27 @@ def test_measurements_and_validity(payload):
 def _timed_sample(payload):
     payload = replace(payload, acquisition_ns=2_000_000, send_ns=5_000_000)
     frame = DataFrame(message_type=MessageType.DATA, length=97, payload=payload)
-    return Sample(
-        frame=frame,
-        receive_ns=7_000_000,
-        clock_offset_ns=1_000_000,
-        clock_valid_until_ns=20_000_000,
-        sync_rtt_ms=2,
-    )
+    return Sample(frame=frame, receive_ns=7_000_000)
 
 
 def test_sample_timing(payload):
     sample = _timed_sample(payload)
-    valid_now = time.perf_counter_ns() + 1_000_000_000
     assert sample.frame.payload.send_ns == 5_000_000
-    assert sample.clock_valid_at(10_000_000)
-    # The properties evaluate against the process clock, which must be inside
-    # the sample's validity window for these numbers to be available.
-    assert replace(sample, clock_valid_until_ns=valid_now).network_ms == 3
-    assert replace(sample, clock_valid_until_ns=valid_now).arrival_age_ms == 6
-    assert sample.age_ms_at(10_000_000) == 9
-    assert sample.clock_valid_at(20_000_000)
-    assert not sample.clock_valid_at(20_000_001)
-    assert math.isnan(sample.age_ms_at(20_000_001))
-    unavailable = Sample(frame=sample.frame, receive_ns=7_000_000)
-    assert not unavailable.clock_valid
-    assert not unavailable.clock_valid_at(10_000_000)
-    assert math.isnan(unavailable.network_ms)
-    assert math.isnan(unavailable.arrival_age_ms)
-    assert math.isnan(unavailable.age_ms_at(10_000_000))
+    # Delay compares the frame timestamps with receiver time directly.
+    assert sample.network_ms == 2
+    assert sample.arrival_age_ms == 5
+    assert sample.age_ms_at(10_000_000) == 8
+    # The property reads the process clock, which is far ahead of these stamps.
+    assert sample.age_ms > 0
 
 
 def test_sample_freshness(payload):
     sample = _timed_sample(payload)
-    # Age at 10 ms is 9 ms, so the 10 ms budget passes and the 8 ms budget does not.
+    # Age at 10 ms is 8 ms, so the 10 ms budget passes and the 7 ms budget does not.
     assert sample.is_fresh_at(10_000_000, max_age_ms=10)
-    assert not sample.is_fresh_at(10_000_000, max_age_ms=8)
+    assert not sample.is_fresh_at(10_000_000, max_age_ms=7)
+    # Zero age is the boundary of a shared-clock comparison.
+    assert sample.is_fresh_at(2_000_000, max_age_ms=0)
     # None skips the age check only, not validity.
     assert sample.is_fresh_at(20_000_001, max_age_ms=None)
     lost = replace(
@@ -222,18 +207,11 @@ def test_sample_freshness(payload):
     )
     assert not lost.is_fresh_at(10_000_000, max_age_ms=10)
     assert lost.is_fresh_at(10_000_000, max_age_ms=10, require_valid=False)
-    # An unsynchronized receiver has no age at all unless diagnostics waive both checks.
-    unsynced = replace(sample, clock_valid_until_ns=0)
-    assert not unsynced.is_fresh_at(10_000_000, max_age_ms=10)
-    assert unsynced.is_fresh_at(10_000_000, max_age_ms=None)
-    assert unsynced.is_fresh_at(10_000_000, max_age_ms=None, require_valid=False)
-    # A negative age is tolerated up to half the synchronization round trip.
-    early = replace(sample, clock_offset_ns=-1_000_000, sync_rtt_ms=10)
-    assert early.age_ms_at(1_000_000) == -2
-    assert early.is_fresh_at(1_000_000, max_age_ms=50)
-    assert not replace(early, sync_rtt_ms=2).is_fresh_at(1_000_000, max_age_ms=50)
-    # A missing round-trip estimate must not reject a readable age by itself.
-    assert replace(early, sync_rtt_ms=math.nan).is_fresh_at(1_000_000, max_age_ms=50)
+    # A timestamp ahead of the receiver clock means the ends disagree, so the
+    # sample is not certified fresh; diagnostics can still read its age.
+    assert sample.age_ms_at(1_000_000) == -1
+    assert not sample.is_fresh_at(1_000_000, max_age_ms=50)
+    assert sample.is_fresh_at(1_000_000, max_age_ms=None)
 
 
 def _send_frame(queue, frame):

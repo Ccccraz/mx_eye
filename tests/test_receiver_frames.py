@@ -16,24 +16,16 @@ import pytest
 from mx_eye.control_server import ControlServer
 from mx_eye.transport import Publisher
 from mx_eye_protocol import DataFrame, MessageType, TrackingFlags, TrackingPayload
-from mx_eye_protocol.control import ClockSync as SyncReply
 from mx_eye_protocol.control import (
-    Command,
     NetworkStatus,
     Reply,
     StatusSnapshot,
     Transport,
 )
 from py_mx_eye import Client
-from py_mx_eye.control import ClockState
 from py_mx_eye.receiver import SampleReceiver
 
 HEADER = struct.Struct("<4sBI")
-
-
-def _no_clock() -> ClockState:
-    """A receiver whose clock has never been synchronized."""
-    return ClockState()
 
 
 def _payload(sequence: int) -> TrackingPayload:
@@ -60,7 +52,7 @@ def _payload(sequence: int) -> TrackingPayload:
 
 def _fresh_payload(sequence: int, flags: TrackingFlags = TrackingFlags.VALID):
     """A payload stamped now, as a live tracker would send it."""
-    stamp = time.perf_counter_ns()
+    stamp = time.time_ns()
     return replace(_payload(sequence), acquisition_ns=stamp, send_ns=stamp, flags=flags)
 
 
@@ -111,7 +103,6 @@ def _scripted_receiver(
         port=5556,
         udp_bind="0.0.0.0",
         max_samples=max_samples,
-        clock_state=_no_clock,
         connect=connect,
     )
     holder["receiver"] = receiver
@@ -265,7 +256,6 @@ def test_tcp_socketpair():
         port=5556,
         udp_bind="0.0.0.0",
         max_samples=4096,
-        clock_state=_no_clock,
         connect=lambda address, timeout: receiver_end,
     )
     thread = threading.Thread(target=receiver.run, args=(Transport.TCP,))
@@ -328,7 +318,6 @@ def test_udp_drops_bad_datagrams():
         port=5556,
         udp_bind="0.0.0.0",
         max_samples=4096,
-        clock_state=_no_clock,
         datagram=lambda *args: DatagramSocket(),
     )
     holder["receiver"] = receiver
@@ -368,11 +357,7 @@ def test_client_receives_published_frames():
     """The public Client path: connect, receive, then apply the freshness rules."""
     data_port, control_port = _free_port(), _free_port()
 
-    def dispatch(request, received_ns):
-        if request.command is Command.SYNC:
-            return Reply(
-                sync=SyncReply(t1=request.t1, t2=received_ns, t3=time.perf_counter_ns())
-            )
+    def dispatch(request):
         return Reply(
             status=StatusSnapshot(
                 state="idle",
@@ -393,7 +378,6 @@ def test_client_receives_published_frames():
         client = Client("127.0.0.1", data_port, control_port)
         try:
             assert client.connect() is client
-            assert _wait_until(lambda: client.stats.clock_synced)
 
             fresh = DataFrame.from_payload(_fresh_payload(1)).encode()
             assert _deliver(publisher, client, fresh, 1)
@@ -404,7 +388,7 @@ def test_client_receives_published_frames():
             stale = DataFrame.from_payload(
                 replace(
                     _fresh_payload(2),
-                    acquisition_ns=time.perf_counter_ns() - 5_000_000_000,
+                    acquisition_ns=time.time_ns() - 5_000_000_000,
                 )
             ).encode()
             assert _deliver(publisher, client, stale, 2)
@@ -420,7 +404,7 @@ def test_client_receives_published_frames():
 
             assert [s.frame.payload.sequence for s in client.drain()] == [1, 2, 3]
             assert client.drain() == []
-            assert client.stats.clock_synced
+            assert client.stats.received == 3
             assert client.stats.error == ""
             assert client.transport is Transport.TCP
         finally:

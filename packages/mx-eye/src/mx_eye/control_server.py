@@ -1,8 +1,7 @@
-"""Concurrent TCP request/response server for control and clock synchronization."""
+"""Concurrent TCP request/response server for tracker commands."""
 
 import socket
 import socketserver
-import time
 from collections.abc import Callable
 from typing import cast
 
@@ -16,8 +15,7 @@ class _RequestHandler(socketserver.BaseRequestHandler):
         server = cast(ControlServer, self.server)
         try:
             request = receive_json(self.request, Request)
-            received_ns = time.perf_counter_ns()
-            reply = server.dispatch(request, received_ns)
+            reply = server.dispatch(request)
         except Exception as exc:  # noqa: BLE001 - report failures at the command boundary
             reply = Reply(ok=False, error=str(exc) or type(exc).__name__)
         try:
@@ -35,7 +33,7 @@ class ControlServer(socketserver.ThreadingTCPServer):
     def __init__(
         self,
         address: tuple[str, int],
-        dispatch: Callable[[Request, int], Reply],
+        dispatch: Callable[[Request], Reply],
     ) -> None:
         self.dispatch = dispatch
         super().__init__(address, _RequestHandler)

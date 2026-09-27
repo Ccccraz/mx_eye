@@ -129,7 +129,7 @@ Each session gets a unique subfolder under the configured output directory:
 |---|---|
 | `video.avi` | MJPG full-frame video; fast, lossy compression, no overlays |
 | `video.mkv` | Alternative FFV1 lossless full-frame video; more CPU demand |
-| `frames.csv` | Video index, acquired source-frame ID, host acquisition timestamp, media time |
+| `frames.csv` | Video index, acquired source-frame ID, shared wall-clock acquisition timestamp, media time |
 | `tracking.csv` | Every locally logged tracking sample, with timestamps, coordinates and flags |
 | `config.json` | Configuration at session start |
 | `session.json` | Final counts, completion status and any detected fault |
@@ -159,8 +159,8 @@ the camera or USB driver. `tracking_log_complete` separately reports log overflo
 
 ## SDK details
 
-`latest()` can initially return None while clock synchronization or tracking is
-starting. It also rejects invalid/lost or stale samples; never use the previous
+`latest()` can return None before the tracker produces its first valid sample. It
+also rejects invalid/lost or stale samples; never use the previous
 valid point as if it were a current measurement. `latest(max_age_ms=None,
 require_valid=False)` is intended for diagnostics. `drain()` returns buffered
 samples for plotting/logging and clears that buffer. A background thread receives
@@ -185,7 +185,7 @@ Defaults are local-machine only:
 | Purpose | Transport | Port |
 |---|---|---:|
 | Tracking samples | TCP, optionally UDP | 5556 |
-| Start/stop/status and clock synchronization | TCP | 5557 |
+| Start/stop/status commands | TCP | 5557 |
 
 For separate computers: set tracker bind address to `0.0.0.0`, use its LAN IP in
 `Client(...)` or `uv run mx-eye-receiver --host TRACKER_IP`, and allow the
@@ -210,14 +210,14 @@ It replaces the old 104-byte v1 protocol and is not compatible with the earlier
 `eye_sender_switchable_v4.py` experiment. Update tracker and SDK together.
 TCP validates the header before buffering the declared payload and disconnects
 on malformed headers; UDP drops malformed datagrams. Only DATA is implemented;
-The binary CMD type is reserved. All commands, including sync, use newline-delimited
+The binary CMD type is reserved. All commands use newline-delimited
 JSON on the single control port. The TCP server handles concurrent connections,
 each with one request and one response followed by connection closure.
 Request, Reply and nested status fields are Pydantic models. Command, Transport
 and SourceMode use StrEnum with auto(); configuration reuses the same enums.
 The control protocol version is the SemVer string `1.0.0`; other versions,
 including legacy integers, are rejected. Packages require Python 3.11 or newer.
-Replies contain either a nested status, sync timestamps, or an error.
+Replies contain either a nested status or an error.
 SDK start/stop/status return StatusSnapshot with field access such as
 `status.network.transport` and `status.stats.tracked`.
 Remove legacy `sync_port` configuration/client arguments and `--sync-port`;
@@ -229,8 +229,8 @@ DataFrame owns the shared binary layout and exposes `from_payload()`, `encode()`
 and the `frame_size` property. Encoding does not validate the header.
 `DataFrame.header_size` is the stream header length. The SDK implements decoding
 and incoming-header validation in `py_mx_eye/_decoder.py`.
-The SDK Sample contains the complete frame plus reception and clock synchronization
-information. Use `sample.frame.payload` to access tracking fields.
+The SDK Sample contains the complete frame plus its reception time.
+Use `sample.frame.payload` to access tracking fields.
 Recording queues carry TrackingPayload objects; the recording layer maps them to
 the unchanged CSV columns without binary float32 conversion.
 
@@ -242,7 +242,7 @@ TCP reception handles split and coalesced frames, rejecting unknown message
 types, reserved CMD frames and invalid DATA lengths before buffering their bodies.
 UDP uses the same binary envelope. Control JSON does not use that envelope.
 Enum values remain lowercase strings in JSON. Successful replies contain
-`ok: true` and either `status` or `sync`; failures contain `ok: false` and `error`.
+`ok: true` and a `status`; failures contain `ok: false` and `error`.
 For example, a status request is `{"command":"status","protocol":"1.0.0"}`
 followed by a newline.
 
@@ -256,25 +256,78 @@ packages are outside this check. Use
 `uv run pyright --verifytypes mx_eye_protocol --ignoreexternal` to check public
 API type completeness without evaluating external dependencies.
 
+## Clock synchronization (direct link)
+
+The consumer device and the mx_eye host are connected by a single Ethernet
+cable with no internet: the consumer device is the **NTP server**, the mx_eye
+host is the **chrony client**. Two small scripts cover install and verification:
+
+```bash
+sudo scripts/install-chrony-client.sh 192.168.50.1   # configure the client
+scripts/check-chrony-client.sh                       # wait and verify
+bash scripts/install-chrony-client.sh --dry-run 192.168.50.1   # review only
+```
+
+`install-chrony-client.sh` installs chrony with `apt-get` when `chronyd` is
+missing, disables `systemd-timesyncd`, keeps the first `/etc/chrony/chrony.conf`
+it finds at `.bak`, writes the configuration below and restarts the service.
+`--dry-run` prints that file and changes nothing. The script writes exactly one
+source, and the argument must be an address or hostname so it cannot become
+configuration syntax:
+
+```text
+server <NTP-SERVER> iburst minpoll 0 maxpoll 3 prefer
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+rtcsync
+```
+
+Distribution pool servers are dropped: on an isolated link they are unreachable
+noise. A Raspberry Pi has no battery-backed RTC, so `makestep 1.0 3` steps the
+clock during the first three updates after startup; later corrections slew.
+
+`check-chrony-client.sh` waits with `chronyc -n waitsync 30 0.05 1.0 1`, then
+prints `chronyc -n tracking` and the source list; it exits non-zero when no
+source is usable. Neither script configures network addresses (the direct link
+needs valid IP settings on both ends) or the consumer side. The server must
+accept this host: a chrony server needs `allow <mx_eye address>` (or the link
+subnet), and Windows `w32time` needs its NtpServer mode enabled. Verify with the
+check script: the Reference ID is the consumer device, the stratum is one hop
+above it, and `Leap status: Normal`.
+
 ## Delay readouts
 
 | Readout | Definition |
 |---|---|
 | Processing | Tracking-end minus tracking-start, measured on tracker |
 | Acquisition → send | Send minus host read-return timestamp |
-| Network | Receiver receipt minus send, after clock-offset correction |
-| Arrival age | Receiver receipt minus acquisition, after correction |
-| Age now | Current receiver time minus acquisition, after correction |
+| Network | Receiver receipt minus send |
+| Arrival age | Receiver receipt minus acquisition |
+| Age now | Current receiver time minus acquisition |
 
-The command server performs four-timestamp synchronization on the same port. The SDK takes eight
-probes, selects the lowest round-trip time, and repeats every 15 seconds. The
-estimate expires after 45 seconds without a successful sync. This works with
-separate monotonic clocks and does not assume identical boot times or wall clocks.
+Every packet timestamp comes from `time.time_ns()` (CLOCK_REALTIME, Unix epoch)
+and each end subtracts the two timestamps directly; no application-level offset
+is estimated or applied. Delay readouts are therefore only meaningful when both
+ends are in **one clock domain**: the same machine, or separate machines
+synchronized as described above. The tracker does not maintain a sync port, RTT
+probes, offset estimation or resynchronization logic; that is infrastructure,
+not part of `mx_eye`. On separate hosts without NTP/PTP the readouts are
+meaningless, and `latest(max_age_ms=...)` will reject samples whose age cannot be
+certified.
 
-One-way delay is an **estimate**: asymmetric network paths and clock drift are
-not observable exactly from this exchange. Half the minimum RTT indicates the
-scale of timing ambiguity under the symmetric-path model, not a calibrated
-confidence interval. Negative estimates are not silently clamped away.
+CLOCK_REALTIME can step by a leap second, which may make a single sample look
+stale; later samples recover on their own. Playback pacing, recording flush
+deadlines and GUI refresh keep using `time.monotonic()`, because they measure
+elapsed time inside one process rather than a shared time base.
+
+A timestamp ahead of the receiver clock means the ends are not reading the same
+clock, so such a sample is not certified fresh; `latest(max_age_ms=None,
+require_valid=False)` still exposes its age for diagnostics. Negative estimates
+are never silently clamped away.
+
+One-way delay is an **estimate**: it includes the frame's encoding, socket and
+scheduling time, so asymmetric paths and residual clock drift remain unobservable.
+The reported value is one subtraction, not a calibrated confidence interval.
 
 The acquisition timestamp is taken **immediately after OpenCV returns a frame**.
 Exposure, USB transfer, and buffering before that point are excluded. The
@@ -289,8 +342,10 @@ A hardware-timestamped camera/backend would be needed to improve that boundary.
   detections, including loss and reacquisition. Template center arithmetic was
   corrected to use the pixel center consistently; display work was removed from
   the tracking path.
-- Transport design follows the earlier v4 TCP/UDP and clock-sync experiments;
-  production code uses standard sockets rather than ZeroMQ.
+- Transport design follows the earlier v4 TCP/UDP experiments; production code
+  uses standard sockets rather than ZeroMQ. The application-level clock-sync
+  experiment was removed in favour of system-level NTP/PTP, so packet timestamps
+  are compared against one shared system clock (issue #7).
 - No physical-camera or real-marmoset-video validation was possible in this session.
 
 The GUI and SDK still need a run with your camera and video on the target machine.

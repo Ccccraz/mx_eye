@@ -1,4 +1,4 @@
-"""Public receiver SDK: composes control access, clock sync and reception.
+"""Public receiver SDK: composes control access and reception.
 
 No Qt or OpenCV dependency. ``Client`` receives continuously even when the
 caller is busy drawing; ``latest()`` never returns a stale point as if it were
@@ -12,16 +12,15 @@ from typing import Self
 from mx_eye_protocol.control import Command, StatusSnapshot, Transport
 from pydantic import BaseModel, ConfigDict
 
-from .control import ClockSync, ControlClient
+from .control import ControlClient
 from .receiver import SampleReceiver
 from .sample import Sample
 
 
 class Stats(BaseModel):
-    """Receiver counters plus live clock-synchronization state.
+    """Receiver counters, read on demand rather than per frame.
 
-    Read on demand rather than per frame, so this is a validated model. NaN is
-    allowed because ``sync_rtt_ms`` stays NaN until the first synchronization.
+    This is a validated model because it is not touched by the receive loop.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -33,8 +32,6 @@ class Stats(BaseModel):
     out_of_order: int
     buffer_overwrites: int
     error: str
-    sync_rtt_ms: float
-    clock_synced: bool
 
 
 class Client:
@@ -50,7 +47,7 @@ class Client:
         buffer_samples: int = 4096,
         timeout: float = 3.0,
         *,
-        now: Callable[[], int] = time.perf_counter_ns,
+        now: Callable[[], int] = time.time_ns,
     ) -> None:
         self.host, self.data_port = host, data_port
         self.control_port = control_port
@@ -59,14 +56,12 @@ class Client:
         self.timeout = timeout
         self._now = now
         self._connected = False
-        self._control = ControlClient(host, control_port, timeout, now=now)
-        self._clock = ClockSync(self._control, now=now)
+        self._control = ControlClient(host, control_port, timeout)
         self._receiver = SampleReceiver(
             host=host,
             port=data_port,
             udp_bind=udp_bind,
             max_samples=buffer_samples,
-            clock_state=self._clock.state,
             now=now,
         )
 
@@ -78,7 +73,6 @@ class Client:
         self._receiver.reset_error()
         self.transport = self.transport or status.network.transport
         self._receiver.start(self.transport)
-        self._clock.start()
         if not self._receiver.wait_ready(self.timeout):
             self.close()
             raise TimeoutError("Receiver socket did not become ready")
@@ -128,13 +122,10 @@ class Client:
             out_of_order=counters.out_of_order,
             buffer_overwrites=counters.buffer_overwrites,
             error=counters.error,
-            sync_rtt_ms=self._clock.rtt_ms,
-            clock_synced=self._clock.synced,
         )
 
     def close(self) -> None:
         self._receiver.stop()
-        self._clock.stop()
         self._connected = False
 
     def __enter__(self) -> Self:

@@ -1,4 +1,4 @@
-"""Session lifecycle and a single command/clock request-response server."""
+"""Session lifecycle and a single command request-response server."""
 
 import base64
 import concurrent.futures
@@ -14,7 +14,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 from mx_eye_protocol.control import (
-    ClockSync,
     Command,
     NetworkStatus,
     Reply,
@@ -177,11 +176,7 @@ class Service:
                             item["result"]["template_center"]
                         )
 
-    def _dispatch_request(self, request: Request, received_ns: int) -> Reply:
-        if request.command is Command.SYNC:
-            return Reply(
-                sync=ClockSync(t1=request.t1, t2=received_ns, t3=time.perf_counter_ns())
-            )
+    def _dispatch_request(self, request: Request) -> Reply:
         if request.command is Command.STATUS:
             return Reply(status=self.snapshot())
         return Reply(status=self.submit(request.command).result(timeout=15))

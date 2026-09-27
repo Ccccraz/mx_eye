@@ -35,6 +35,20 @@ Click **Start** in the tracker. In the client, click **Connect**; its
 START is idempotent when a session is already running. Alternatively, connect the
 client first and start the session from there.
 
+## Clock synchronization
+
+The eyetracker and the consumer device share one time base through system-level
+NTP; delay and age readouts compare packet timestamps directly. On a direct
+Ethernet link with the consumer device as NTP server, run this once on the
+mx_eye host (Raspberry Pi OS/Debian, chrony):
+
+```bash
+sudo scripts/install-chrony-client.sh 192.168.50.1   # consumer-device address
+scripts/check-chrony-client.sh                       # wait and verify
+```
+
+More detail in AGENTS.md.
+
 ## SDK
 
 The SDK is the `py-mx-eye` package; `uv sync --all-extras` installs it.
@@ -52,6 +66,6 @@ with Client("127.0.0.1") as eye:
     eye.stop()
 ```
 
-`latest()` returns None until tracking and clock synchronization are ready, and
+`latest()` returns None until the tracker produces its first valid sample, and
 coordinates are uncalibrated source-image pixels. A runnable example:
 `uv run python -m mx_eye_client.receive_minimal`. More detail in AGENTS.md.

@@ -73,7 +73,7 @@ class Receiver(W.QWidget):
         self.delay = self.delayplot.plot(pen=pg.mkPen("#83d9b0", width=1.4))
         layout.addWidget(self.delayplot, 1)
         self.info = label(
-            "Network delay needs clock synchronization. Camera exposure / USB latency is not measured.",
+            "Delay compares frame timestamps with this computer's clock, so both ends must share one clock domain (same host, or NTP/PTP). Camera exposure / USB latency is not measured.",
             "muted",
         )
         self.info.setWordWrap(True)
@@ -156,7 +156,7 @@ class Receiver(W.QWidget):
         if sample:
             stale = not math.isfinite(sample.age_ms) or sample.age_ms > 100
             validity = (
-                "STALE / UNSYNCED"
+                "STALE"
                 if stale
                 else ("VALID" if sample.frame.payload.valid else "LOST")
             )
@@ -164,14 +164,16 @@ class Receiver(W.QWidget):
                 f"{validity}     {self.rate:.1f} Hz     PROCESS {number(sample.frame.payload.processing_ms)} ms     NETWORK ≈{number(sample.network_ms)} ms     AGE NOW ≈{number(sample.age_ms)} ms"
             )
         self.info.setText(
-            f"Clock {'synced' if stats.clock_synced else 'not synced'} · minimum RTT {number(stats.sync_rtt_ms)} ms · packet gaps {stats.sequence_gaps} · unprocessed source frames ≥{stats.acquisition_skips} · buffer overwrites {stats.buffer_overwrites}\nDelay is estimated from host read-return timestamps; it excludes exposure and camera/USB buffering. Raw, uncalibrated image-pixel signal."
+            f"packet gaps {stats.sequence_gaps} · unprocessed source frames ≥{stats.acquisition_skips} · buffer overwrites {stats.buffer_overwrites}\nDelay is measured from host read-return timestamps shared by both ends; it excludes exposure and camera/USB buffering. Raw, uncalibrated image-pixel signal."
         )
         if stats.error:
             self.state.setText(stats.error)
         if self.history:
             data = np.asarray(self.history)
-            data = data[data[:, 0] >= time.perf_counter() - 8]
-            t = data[:, 0] - time.perf_counter()
+            # Sample timestamps and this window share the tracker's wall clock.
+            wall = time.time_ns() / 1e9
+            data = data[data[:, 0] >= wall - 8]
+            t = data[:, 0] - wall
             self.x.setData(t, data[:, 1], connect="finite")
             self.y.setData(t, data[:, 2], connect="finite")
             self.delay.setData(t, data[:, 3], connect="finite")
