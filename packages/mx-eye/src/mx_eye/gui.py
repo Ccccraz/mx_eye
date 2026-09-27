@@ -1,10 +1,6 @@
-"""Desktop tracker. Run python mx_eye.py or the installed mx-eye command."""
-import argparse
+"""Desktop tracker window and dialogs. Run the tracker with python -m mx_eye."""
 import base64
 import copy
-import multiprocessing as mp
-import signal
-import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -17,7 +13,7 @@ import pyqtgraph as pg
 from . import config as cfg
 from .service import Service
 from .cameras import CameraControls
-from .widgets import STYLE, EyeView, Parameter, Section, SeekSlider, label
+from .widgets import EyeView, Parameter, Section, SeekSlider, label
 from .helptext import TIPS, add_tooltips
 
 class Settings(W.QDialog):
@@ -669,22 +665,3 @@ class Window(W.QMainWindow):
         self.timer.stop()
         self.service.close()
         event.accept()
-
-def main():
-    mp.freeze_support()
-    parser=argparse.ArgumentParser(description='mx_eye tracker')
-    parser.add_argument('--config',type=Path)
-    parser.add_argument('--demo',action='store_true',help='Use the artificial eye source')
-    args=parser.parse_args()
-    config=cfg.load(args.config) if args.config else cfg.defaults()
-    if args.demo: config['source']['mode']='simulation'
-    app=W.QApplication.instance() or W.QApplication(sys.argv)
-    app.setStyle('Fusion')
-    app.setStyleSheet(STYLE)
-    window=Window(config)
-    window.show()
-    signal.signal(signal.SIGINT,lambda *_:window.close())
-    return app.exec()
-
-if __name__=='__main__':
-    raise SystemExit(main())

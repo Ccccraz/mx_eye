@@ -3,7 +3,7 @@
 Install mx-eye first or run from an IDE with the project folder on sys.path.
 """
 import time
-from app import Client
+from mx_eye import Client
 
 TRACKER_IP = '127.0.0.1'
 
