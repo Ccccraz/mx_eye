@@ -1,6 +1,5 @@
 """Session lifecycle and separate command/clock servers."""
 import concurrent.futures
-import copy
 import datetime
 import json
 import multiprocessing as mp
@@ -17,7 +16,7 @@ import socket
 
 from mx_eye_protocol.control import (PROTOCOL_VERSION, CMD_START, CMD_STATUS, CMD_STOP,
                                     CMD_SYNC, Request, Reply, StatusSnapshot)
-from .config import validate
+from .config import MxEyeConfigStore, SourceMode
 from .transport import listen, receive_json, send_json
 from .pipeline import Mailbox, FrameRing, PreviewMailbox, capture_worker, tracking_worker, writer_worker
 
@@ -26,8 +25,8 @@ STAT_NAMES = ('acquired','tracked','written','enqueued','tracking_skips','mailbo
               'source_fps','source_index','processing_us')
 
 class Service:
-    def __init__(self, config):
-        self.config = validate(config)
+    def __init__(self, config: MxEyeConfigStore):
+        self.config = config
         self.ctx = mp.get_context('spawn')
         self._lock = threading.RLock()
         self._requests = queue.Queue()
@@ -72,7 +71,7 @@ class Service:
             return StatusSnapshot(state=self.state,message=self.message,
                                   paused=bool(run and run['paused'].is_set()),
                                   session=self.session,stats=stats,directory=self.directory,
-                                  network=dict(self.config['network']),source=dict(self.source_info),
+                                  network=self.config.value.network.model_dump(mode='json'),source=dict(self.source_info),
                                   priority=list(self.priority_info),
                                   server_errors=list(self._server_errors))
 
@@ -90,24 +89,25 @@ class Service:
         item = run['preview'].get()
         if item:
             with self._lock:
-                png = (self.config.get('template') or {}).get('png')
+                png = self.config.value.template.png if self.config.value.template else None
                 if png != self._template_png:
                     self._template_png = png
                     self._template_image = cv2.imdecode(np.frombuffer(base64.b64decode(png),np.uint8),cv2.IMREAD_GRAYSCALE) if png else None
                 item['template'] = self._template_image
                 self._preview = item
                 if item['revision'] >= self.revision:
-                    self.config['tracking'].update(item['tracking'])
-                    self.config['tracking']['roi'] = item['result']['roi']
-                    if self.config.get('template'):
-                        self.config['template']['anchor'] = item['result']['template_anchor']
-                        self.config['template']['center'] = item['result']['template_center']
+                    self.config.value.tracking = item['tracking'].model_copy(deep=True)
+                    self.config.value.tracking.roi = tuple(item['result']['roi'])
+                    if self.config.value.template:
+                        self.config.value.template.anchor = tuple(item['result']['template_anchor'])
+                        self.config.value.template.center = tuple(item['result']['template_center'])
 
     def _serve(self, kind, ready):
-        net = self.config['network']
+        net = self.config.value.network
         server = None
         try:
-            server = listen(net['bind'],net[kind+'_port'])
+            port = net.sync_port if kind == 'sync' else net.control_port
+            server = listen(net.bind,port)
             server.settimeout(0.1)
             ready.set()
             while not self._servers_stop.is_set():
@@ -148,12 +148,13 @@ class Service:
             if self.state == 'running':
                 return self.snapshot()  # idempotent START
             raise RuntimeError('Wait until the previous recording has finished draining.')
-        config = validate(copy.deepcopy(self.config))
+        # Each worker process gets its own snapshot of the shared store.
+        config = MxEyeConfigStore(self.config.value.model_copy(deep=True))
         if self._server_errors:
             raise RuntimeError('; '.join(self._server_errors))
-        s = config['source']
-        if s['mode'] == 'video':
-            cap = cv2.VideoCapture(s['path'])
+        s = config.value.source
+        if s.mode is SourceMode.VIDEO:
+            cap = cv2.VideoCapture(s.path)
             try:
                 if not cap.isOpened():
                     raise ValueError('Choose an existing, readable video file.')
@@ -161,11 +162,11 @@ class Service:
             finally:
                 cap.release()
         else:
-            width, height = max(s['width'],1280), max(s['height'],800)
+            width, height = max(s.width,1280), max(s.height,800)
         if not 0 < width <= 16384 or not 0 < height <= 16384:
             raise ValueError('Unsupported source dimensions.')
         max_bytes = width*height*3
-        record = s['mode'] == 'camera' or (s['mode'] == 'simulation' and config['recording']['record_simulation'])
+        record = s.mode is SourceMode.CAMERA or (s.mode is SourceMode.SIMULATION and config.value.recording.record_simulation)
         c = self.ctx
         stats = {k:c.Value('d',0) for k in STAT_NAMES}
         run = dict(stats=stats,stop=c.Event(),capture_done=c.Event(),tracking_done=c.Event(),
@@ -183,10 +184,10 @@ class Service:
         self.run = run
         try:
             if record:
-                capacity = max(2, int(config['recording']['buffer_mb']*1024**2/max_bytes))
+                capacity = max(2, int(config.value.recording.buffer_mb*1024**2/max_bytes))
                 run['ring'] = FrameRing(c,max_bytes,capacity)
                 stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-                self.directory = str(Path(config['recording']['directory']).expanduser().resolve()/f'{stamp}_{self.session:016x}')
+                self.directory = str(Path(config.value.recording.directory).expanduser().resolve()/f'{stamp}_{self.session:016x}')
                 writer = c.Process(target=writer_worker,name='mx-eye recording',args=(config,self.session,self.directory,
                     run['ring'],run['samples'],run['capture_done'],run['tracking_done'],run['writer_done'],stats,run['events']))
                 writer.start()
@@ -249,7 +250,7 @@ class Service:
                 elif kind == 'priority':
                     self.priority_info.append(e['message'])
                 elif kind == 'template':
-                    self.config['template'] = e['template']
+                    self.config.value.template = e['template']
                 elif kind in ('source','dimensions'):
                     self.source_info.update({k:v for k,v in e.items() if k!='kind'})
                 elif kind.endswith('_ready'):
@@ -320,9 +321,9 @@ class Service:
         if command == 'settings':
             if self.run:
                 raise RuntimeError('Stop the session before changing source/network/recording settings.')
-            updated = validate(args['config'])
-            network_changed = updated['network'] != self.config['network']
-            self.config = updated
+            updated = MxEyeConfigStore(args['config'].value.model_copy(deep=True))
+            network_changed = updated.value.network != self.config.value.network
+            self.config.replace(updated.value)
             if network_changed:
                 self._servers_stop.set()
                 for t in self._threads:
@@ -334,35 +335,33 @@ class Service:
                     raise RuntimeError('; '.join(self._server_errors))
             return self.snapshot()
         if command == 'config':
-            check = copy.deepcopy(self.config)
-            check['tracking'].update(args['tracking'])
-            validate(check)
-            self.config['tracking'].update(args['tracking'])
+            check = MxEyeConfigStore(self.config.value.model_copy(deep=True))
+            check.value.tracking = args['tracking'].model_copy(deep=True)
+            self.config.replace(check.value)
         if command == 'speed':
-            check = copy.deepcopy(self.config)
-            check['source']['speed'] = args['speed']
-            validate(check)
-            self.config['source']['speed'] = args['speed']
-            if self.run and self.config['source']['mode'] == 'video':
+            check = MxEyeConfigStore(self.config.value.model_copy(deep=True))
+            check.value.source.speed = args['speed']
+            self.config.replace(check.value)
+            if self.run and self.config.value.source.mode is SourceMode.VIDEO:
                 self.run['capture_commands'].put_nowait(dict(command='speed',speed=args['speed']))
             return self.snapshot()
         if command == 'load_template':
-            self.config['template'] = args['template']
+            self.config.value.template = args['template']
         if command == 'clear_template':
-            self.config['template'] = None
+            self.config.value.template = None
         if not self.run:
             if command == 'roi':
-                self.config['tracking']['roi'] = args['roi']
+                self.config.value.tracking.roi = tuple(args['roi'])
             return self.snapshot()
         if command == 'pause':
-            if self.config['source']['mode'] != 'video':
+            if self.config.value.source.mode is not SourceMode.VIDEO:
                 raise ValueError('Only file playback can be paused.')
             if args['paused']:
                 self.run['paused'].set()
             else:
                 self.run['paused'].clear()
         elif command in ('seek','step'):
-            if self.config['source']['mode'] != 'video':
+            if self.config.value.source.mode is not SourceMode.VIDEO:
                 raise ValueError('Seek and step are only available for video files.')
             self.run['paused'].set()
             self.run['capture_commands'].put_nowait(dict(command=command,**args))

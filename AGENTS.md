@@ -75,8 +75,14 @@ and provenance. The workspace members live in `packages/mx-eye`,
   preview. Click instructions stay below each video. Slider values sit beside
   their sliders in compact, collapsible groups.
 - **Configuration:** Save/Load JSON also preserves these display switches.
-  Configurations include the template image. v13 configuration JSON can also be
-  imported; those old files did not embed the separate template image.
+  Configurations include the template image. The file is a `format: "mx-eye"`,
+  `version: "1.0.0"` document validated by the typed pydantic models in
+  `packages/mx-eye/src/mx_eye/config/`: unknown keys, wrong types and
+  out-of-range values are refused on load, on save and on live assignment, while
+  absent groups and keys fall back to the defaults. Saving writes the file
+  atomically and omits unset display switches. The GUI resolves the single
+  process-wide store from `config.store()` and injects it into the service, while
+  every worker process receives a per-session copy.
 - **Load/Save template:** visible top-row buttons import an image or export PNG.
 
 Camera index 0 is usually the first camera. On Windows, Auto chooses DirectShow;
@@ -188,6 +194,8 @@ For separate computers: set tracker bind address to `0.0.0.0`, use its LAN IP in
 configured ports through the local firewall. With UDP, also set the receiver's
 LAN IP in tracker Settings. UDP has one target; TCP accepts up to eight receivers.
 The SDK reads the configured transport from the status server when connecting.
+Both address fields are validated as IPv4 literals, so hostnames are rejected
+instead of being resolved at run time.
 Reconnect clients after changing transport/ports. The protocol is unauthenticated
 and intended for a trusted lab network, not an exposed internet service.
 

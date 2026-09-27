@@ -22,7 +22,7 @@ def listen(host, port):
         sock.setsockopt(socket.SOL_SOCKET,socket.SO_EXCLUSIVEADDRUSE,1)
     else:
         sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-    sock.bind(('0.0.0.0' if host == '*' else host,int(port)))
+    sock.bind((str(host),int(port)))
     sock.listen(8)
     return sock
 

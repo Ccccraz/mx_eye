@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6 import QtWidgets as W
 
 from . import config as cfg
+from .config import SourceMode
 from .gui import Window
 from .widgets import STYLE
 
@@ -18,12 +19,12 @@ def main():
     parser.add_argument('--config',type=Path)
     parser.add_argument('--demo',action='store_true',help='Use the artificial eye source')
     args=parser.parse_args()
-    config=cfg.load(args.config) if args.config else cfg.defaults()
-    if args.demo: config['source']['mode']='simulation'
+    config=cfg.configure(args.config)
+    if args.demo: config.value.source.mode=SourceMode.SIMULATION
     app=W.QApplication.instance() or W.QApplication(sys.argv)
     app.setStyle('Fusion')
     app.setStyleSheet(STYLE)
-    window=Window(config)
+    window=Window()
     window.show()
     signal.signal(signal.SIGINT,lambda *_:window.close())
     return app.exec()

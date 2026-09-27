@@ -15,6 +15,7 @@ import numpy as np
 import psutil
 
 from mx_eye_protocol.packets import PUPIL, CR, PUPIL_ONLY, SIMULATION, ROI_RELATIVE, VALID, Packet, encode
+from .config import CameraBackend, PupilCoordinates, RecordingCodec, SourceMode, TrackingMode, Transport
 from .tracking import Tracker
 from .video import VideoReader
 from .transport import Publisher
@@ -161,7 +162,7 @@ def capture_worker(config, mailbox, ring, stop, done, paused, commands,
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     cv2.setNumThreads(1)
     report(events, 'priority', message=priority('capture'))
-    source = config['source']
+    source = config.value.source
     cap = None
     reader = None
     navigation_id=0
@@ -169,52 +170,52 @@ def capture_worker(config, mailbox, ring, stop, done, paused, commands,
     due = time.perf_counter()
     first_size = None
     try:
-        mode = source['mode']
-        if mode != 'simulation':
-            backend = {'auto':cv2.CAP_ANY,'dshow':cv2.CAP_DSHOW,
-                       'msmf':cv2.CAP_MSMF,'v4l2':cv2.CAP_V4L2}[source['backend']]
-            if mode == 'video':
-                reader=VideoReader(source['path'],stop)
+        mode = source.mode
+        if mode is not SourceMode.SIMULATION:
+            backend = {CameraBackend.AUTO:cv2.CAP_ANY,CameraBackend.DSHOW:cv2.CAP_DSHOW,
+                       CameraBackend.MSMF:cv2.CAP_MSMF,CameraBackend.V4L2:cv2.CAP_V4L2}[source.backend]
+            if mode is SourceMode.VIDEO:
+                reader=VideoReader(source.path,stop)
                 cap=reader.cap
             else:
                 if backend == cv2.CAP_ANY and os.name == 'nt':
                     backend = cv2.CAP_DSHOW
-                cap = cv2.VideoCapture(int(source['camera']), backend)
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*source['fourcc']))
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, source['width'])
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, source['height'])
-                cap.set(cv2.CAP_PROP_FPS, source['fps'])
+                cap = cv2.VideoCapture(int(source.camera), backend)
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*source.fourcc))
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, source.width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, source.height)
+                cap.set(cv2.CAP_PROP_FPS, source.fps)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if not cap.isOpened():
                 raise RuntimeError('Cannot open source. Check camera index/backend or video path.')
             reported_fps = cap.get(cv2.CAP_PROP_FPS)
-            fps = reported_fps if math.isfinite(reported_fps) and 1 <= reported_fps <= 1000 else source['fps']
-            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if mode == 'video' else 0
+            fps = reported_fps if math.isfinite(reported_fps) and 1 <= reported_fps <= 1000 else source.fps
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if mode is SourceMode.VIDEO else 0
         else:
-            fps, total = source['fps'], 0
+            fps, total = source.fps, 0
         stats['source_fps'].value = fps
         report(events, 'source', fps=fps, total=total, mode=mode)
-        if mode == 'camera':
+        if mode is SourceMode.CAMERA:
             code=int(cap.get(cv2.CAP_PROP_FOURCC))
             actual_format=''.join(chr((code >> shift) & 255) for shift in (0,8,16,24)) if code else 'unknown'
             if not actual_format.isprintable(): actual_format='unknown'
             report(events, 'source', actual_format=actual_format,
                    driver_fps=reported_fps if math.isfinite(reported_fps) and 1 <= reported_fps <= 1000 else None,
-                   requested_format=source['fourcc'],requested_fps=source['fps'])
+                   requested_format=source.fourcc,requested_fps=source.fps)
         while not stop.is_set():
             step = False
             try:
                 while True:
                     cmd = commands.get_nowait()
-                    if mode == 'video' and cmd['command'] == 'speed':
-                        source['speed'] = cmd['speed']
+                    if mode is SourceMode.VIDEO and cmd['command'] == 'speed':
+                        source.speed = cmd['speed']
                         due = time.perf_counter()
-                    if mode == 'video' and cmd['command'] == 'seek':
+                    if mode is SourceMode.VIDEO and cmd['command'] == 'seek':
                         index = max(0,int(cmd['frame']))
                         navigation_id=cmd.get('navigation_id',navigation_id)
                         paused.set()
                         step = True
-                    if mode == 'video' and cmd['command'] == 'step':
+                    if mode is SourceMode.VIDEO and cmd['command'] == 'step':
                         index=max(0,int(cmd.get('from_frame',stats['source_index'].value))+int(cmd.get('direction',1)))
                         navigation_id=cmd.get('navigation_id',navigation_id)
                         paused.set()
@@ -224,20 +225,20 @@ def capture_worker(config, mailbox, ring, stop, done, paused, commands,
                         break  # Process each frame-step command on its own frame.
             except queue.Empty:
                 pass
-            if mode=='video' and reader.total is not None and index>=reader.total and not step:
+            if mode is SourceMode.VIDEO and reader.total is not None and index>=reader.total and not step:
                 paused.set()  # Keep the last frame available for backward stepping.
-            if mode == 'video' and paused.is_set() and not step and fid:
+            if mode is SourceMode.VIDEO and paused.is_set() and not step and fid:
                 stop.wait(0.005)
                 due = time.perf_counter()
                 continue
-            if mode in ('video','simulation'):
+            if mode in (SourceMode.VIDEO, SourceMode.SIMULATION):
                 delay = due-time.perf_counter()
                 if delay > 0 and stop.wait(delay):
                     break
-            if mode == 'simulation':
-                frame = synthetic_frame(index, source['width'], source['height'], fps)
+            if mode is SourceMode.SIMULATION:
+                frame = synthetic_frame(index, source.width, source.height, fps)
                 ok = True
-            elif mode=='video':
+            elif mode is SourceMode.VIDEO:
                 decoded=reader.read(index)
                 ok=decoded is not None
                 if ok: frame,index,msec=decoded
@@ -249,7 +250,7 @@ def capture_worker(config, mailbox, ring, stop, done, paused, commands,
                 ok, frame = cap.read()
             acquired = time.perf_counter_ns()  # Host read-return time, NOT sensor exposure.
             if not ok:
-                if mode == 'camera':
+                if mode is SourceMode.CAMERA:
                     raise RuntimeError('Camera read failed or camera disconnected.')
                 report(events, 'eof')
                 break
@@ -264,9 +265,9 @@ def capture_worker(config, mailbox, ring, stop, done, paused, commands,
             elif frame.shape != first_size:
                 raise RuntimeError('Source dimensions changed during the session.')
             media = -1
-            if mode == 'video':
+            if mode is SourceMode.VIDEO:
                 media = int(msec*1e6) if math.isfinite(msec) and (msec > 0 or index == 0) else int(index/fps*1e9)
-            elif mode == 'simulation':
+            elif mode is SourceMode.SIMULATION:
                 media = int(index/fps*1e9)
             fid += 1
             stats['acquired'].value = fid
@@ -275,7 +276,7 @@ def capture_worker(config, mailbox, ring, stop, done, paused, commands,
             if not mailbox.put(frame, (fid,acquired,media,index,navigation_id)):
                 stats['mailbox_misses'].value += 1
                 # File playback waits for each frame; never silently skip it.
-                if mode == 'video':
+                if mode is SourceMode.VIDEO:
                     while not stop.is_set() and not mailbox.put(frame, (fid,acquired,media,index,navigation_id)):
                         stop.wait(0.0005)
             if ring is not None and not stats['record_fault'].value:
@@ -285,11 +286,11 @@ def capture_worker(config, mailbox, ring, stop, done, paused, commands,
                     stats['record_fault'].value = 1
                     report(events, 'record_error', message='Recording buffer overflow. Recording stopped; tracking continues. Session is incomplete.')
             index += 1
-            if mode == 'video':
+            if mode is SourceMode.VIDEO:
                 while not stop.is_set() and tracked_frame.value < fid:
                     stop.wait(0.0005)
-            if mode in ('video','simulation'):
-                due = max(due+1/(fps*source['speed']), time.perf_counter())
+            if mode in (SourceMode.VIDEO, SourceMode.SIMULATION):
+                due = max(due+1/(fps*source.speed), time.perf_counter())
     except Exception as exc:
         stats['capture_fault'].value = 1
         report(events, 'error', message=str(exc))
@@ -304,10 +305,10 @@ def tracking_worker(config, session, mailbox, commands, preview, samples,
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     cv2.setNumThreads(1)
     report(events, 'priority', message=priority('tracking'))
-    core = Tracker(config['tracking'])
-    if config.get('template'):
-        restore_template(core, config['template'])
-    net = config['network']
+    core = Tracker(config.value.tracking)
+    if config.value.template:
+        restore_template(core, config.value.template)
+    net = config.value.network
     pub, udp = None, None
     frame_id = seq = 0
     revision = 0
@@ -315,12 +316,12 @@ def tracking_worker(config, session, mailbox, commands, preview, samples,
     current = None
     last_media = -1
     try:
-        if net['transport'] == 'tcp':
-            pub = Publisher(net['bind'], net['data_port'])
+        if net.transport is Transport.TCP:
+            pub = Publisher(net.bind, net.data_port)
         else:
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp.setblocking(False)
-            destination = (socket.gethostbyname(net['udp_host']), net['data_port'])
+            destination = (str(net.udp_host), net.data_port)
         report(events, 'tracking_ready')
         while True:
             changed = False
@@ -330,9 +331,9 @@ def tracking_worker(config, session, mailbox, commands, preview, samples,
                     revision = cmd.get('revision', revision)
                     kind = cmd['command']
                     if kind == 'config':
-                        previous_mode = core.config['tracking_mode']
-                        core.config.update(cmd['tracking'])
-                        if previous_mode != core.config['tracking_mode']:
+                        previous_mode = core.config.tracking_mode
+                        core.config = cmd['tracking'].model_copy(deep=True)
+                        if previous_mode != core.config.tracking_mode:
                             core.clear_feature_history()
                     elif kind == 'roi':
                         core.roi = list(cmd['roi'])
@@ -342,7 +343,7 @@ def tracking_worker(config, session, mailbox, commands, preview, samples,
                         core.clear_feature_history()
                     elif kind == 'search':
                         core.template_anchor = tuple(cmd['center'])
-                        core.config['template_search_size'] = cmd['size']
+                        core.config.template_search_size = cmd['size']
                     elif kind == 'load_template':
                         restore_template(core,cmd['template'])
                     elif kind == 'clear_template':
@@ -384,10 +385,10 @@ def tracking_worker(config, session, mailbox, commands, preview, samples,
                 pupil, cr = result['pupil'], result['cr']
                 nan = float('nan')
                 flags = (VALID if result['valid'] else 0) | (PUPIL if pupil else 0) | (CR if cr else 0)
-                flags |= PUPIL_ONLY if core.config['tracking_mode'] == 'Pupil only' else 0
-                if flags & PUPIL_ONLY and core.config.get('pupil_coordinates','absolute') == 'relative':
+                flags |= PUPIL_ONLY if core.config.tracking_mode is TrackingMode.PUPIL_ONLY else 0
+                if flags & PUPIL_ONLY and core.config.pupil_coordinates is PupilCoordinates.RELATIVE:
                     flags |= ROI_RELATIVE
-                flags |= SIMULATION if config['source']['mode'] == 'simulation' else 0
+                flags |= SIMULATION if config.value.source.mode is SourceMode.SIMULATION else 0
                 send = time.perf_counter_ns()
                 packet = Packet(session=session,sequence=seq,frame=frame_id,
                                 acquisition_ns=acquired,tracking_start_ns=start,
@@ -418,14 +419,14 @@ def tracking_worker(config, session, mailbox, commands, preview, samples,
                 stats['tracked'].value = seq
                 stats['processing_us'].value = (end-start)/1000
             now = time.perf_counter()
-            if changed or (fresh is not None and config['source']['mode']=='video') or now-last_preview >= 1/config['display']['hz']:
+            if changed or (fresh is not None and config.value.source.mode is SourceMode.VIDEO) or now-last_preview >= 1/config.value.display.hz:
                 payload = dict(result=result,
-                               tracking=dict(core.config), frame_id=frame_id,
+                               tracking=core.config.model_copy(deep=True), frame_id=frame_id,
                                media_ns=media, processing_ms=(end-start)/1e6,
                                revision=revision)
                 payload.update(source_index=source_index,navigation_id=navigation_id)
                 published=preview.put(current,payload)
-                if config['source']['mode']=='video':
+                if config.value.source.mode is SourceMode.VIDEO:
                     while not published and not stop.is_set():
                         stop.wait(.001)
                         published=preview.put(current,payload)
@@ -460,12 +461,12 @@ def serialize_template(core):
                 anchor=core.template_anchor, center=core.template_last_center) if ok else None
 
 def restore_template(core, data):
-    image = cv2.imdecode(np.frombuffer(base64.b64decode(data['png']),np.uint8),cv2.IMREAD_GRAYSCALE)
+    image = cv2.imdecode(np.frombuffer(base64.b64decode(data.png),np.uint8),cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise ValueError('Invalid saved template')
     core.template = image
-    core.template_anchor = data['anchor']
-    core.template_last_center = data['center']
+    core.template_anchor = data.anchor
+    core.template_last_center = data.center
 
 def writer_worker(config, session, directory, ring, samples, capture_done,
                   tracking_done, done, stats, events, test_delay=0):
@@ -480,7 +481,7 @@ def writer_worker(config, session, directory, ring, samples, capture_done,
     frame_file = sample_file = None
     try:
         folder.mkdir(parents=True, exist_ok=False)
-        (folder/'config.json').write_text(json.dumps(config,indent=2),encoding='utf-8')
+        config.save(folder/'config.json')
         frame_file = (folder/'frames.csv').open('w',newline='',encoding='utf-8')
         sample_file = (folder/'tracking.csv').open('w',newline='',encoding='utf-8')
         fw, sw = csv.writer(frame_file), csv.writer(sample_file)
@@ -500,10 +501,10 @@ def writer_worker(config, session, directory, ring, samples, capture_done,
                 frame, (fid,acquired,media) = item
                 if writer is None:
                     shape = frame.shape[:2]
-                    fps = stats['source_fps'].value or config['source']['fps']
-                    filename = 'video.avi' if config['recording']['codec'] == 'MJPG' else 'video.mkv'
+                    fps = stats['source_fps'].value or config.value.source.fps
+                    filename = 'video.avi' if config.value.recording.codec is RecordingCodec.MJPG else 'video.mkv'
                     writer = cv2.VideoWriter(str(folder/filename),
-                        cv2.VideoWriter_fourcc(*config['recording']['codec']), fps,
+                        cv2.VideoWriter_fourcc(*config.value.recording.codec), fps,
                         (shape[1],shape[0]))
                     if not writer.isOpened():
                         raise RuntimeError('Video encoder could not open. Try MJPG or another recording directory.')

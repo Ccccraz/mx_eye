@@ -1,6 +1,5 @@
 """Desktop tracker window and dialogs. Run the tracker with python -m mx_eye."""
 import base64
-import copy
 import time
 from collections import deque
 from pathlib import Path
@@ -11,15 +10,18 @@ from PySide6 import QtCore as C, QtWidgets as W
 import pyqtgraph as pg
 
 from . import config as cfg
+from .config import PupilCoordinates, RecordingCodec, SourceMode, TrackingMode, Transport
 from .service import Service
 from .cameras import CameraControls
 from .widgets import EyeView, Parameter, Section, SeekSlider, label
 from .helptext import TIPS, add_tooltips
 
+ENUM_FIELDS={('network','transport'):Transport,('recording','codec'):RecordingCodec}
+
 class Settings(W.QDialog):
     def __init__(self,config,parent=None):
         super().__init__(parent)
-        self.config=copy.deepcopy(config)
+        self.config=cfg.MxEyeConfigStore(config.value.model_copy(deep=True))
         self.fields={}
         self.setWindowTitle('mx_eye · Settings')
         self.resize(500,530)
@@ -29,12 +31,12 @@ class Settings(W.QDialog):
         specs={
             'Camera':('source',[]),
             'Network':('network',[
-                ('bind','Tracker bind address',None),('transport','Sample transport',['tcp','udp']),
+                ('bind','Tracker bind address',None),('transport','Sample transport',[item.value for item in Transport]),
                 ('data_port','Sample port',1024,65535),('control_port','Command port',1024,65535),
                 ('sync_port','Clock-sync port',1024,65535),('udp_host','UDP receiver address',None)]),
             'Recording':('recording',[
                 ('directory','Output folder',None),('buffer_mb','Buffer size (MiB)',8,2048),
-                ('codec','Codec',['MJPG','FFV1']),('record_simulation','Record simulation',True)])}
+                ('codec','Codec',[item.value for item in RecordingCodec]),('record_simulation','Record simulation',True)])}
         notes={
             'Camera':'FPS and format are requests to the driver. The status bar shows measured acquisition rate. Camera mode always records while running.',
             'Network':'For another computer, bind to 0.0.0.0 and use this tracker’s IP in the SDK. UDP sends to one configured receiver. Control is unauthenticated: use only your trusted local network.',
@@ -44,10 +46,10 @@ class Settings(W.QDialog):
             form=W.QFormLayout(page)
             form.setVerticalSpacing(13)
             if title=='Camera':
-                self.camera_controls=CameraControls(config['source'],self)
+                self.camera_controls=CameraControls(config.value.source,self)
                 form.addRow(self.camera_controls)
             for key,text,*args in rows:
-                value=config[group][key]
+                value=getattr(getattr(config.value,group),key)
                 if args[0] is True:
                     widget=W.QCheckBox()
                     widget.setChecked(value)
@@ -87,15 +89,17 @@ class Settings(W.QDialog):
         if self.camera_controls.process is not None:
             W.QMessageBox.information(self,'Camera discovery','Wait for camera discovery to finish before saving.')
             return
-        self.config['source'].update(self.camera_controls.values())
-        for (group,key),widget in self.fields.items():
-            if isinstance(widget,W.QCheckBox): value=widget.isChecked()
-            elif isinstance(widget,W.QComboBox): value=widget.currentText()
-            elif isinstance(widget,W.QLineEdit): value=widget.text().strip()
-            else: value=widget.value()
-            self.config[group][key]=value
         try:
-            cfg.validate(self.config)
+            self.config.value.source=self.camera_controls.values()
+            for (group,key),widget in self.fields.items():
+                if isinstance(widget,W.QCheckBox): value=widget.isChecked()
+                elif isinstance(widget,W.QComboBox):
+                    value=widget.currentText()
+                    enum=ENUM_FIELDS.get((group,key))
+                    if enum is not None: value=enum(value)
+                elif isinstance(widget,W.QLineEdit): value=widget.text().strip()
+                else: value=widget.value()
+                setattr(getattr(self.config.value,group),key,value)
         except ValueError as exc:
             W.QMessageBox.warning(self,'Check settings',str(exc))
             return
@@ -106,8 +110,9 @@ class Settings(W.QDialog):
         super().done(result)
 
 class Window(W.QMainWindow):
-    def __init__(self,config):
+    def __init__(self):
         super().__init__()
+        config=cfg.store()
         self.setWindowTitle('mx_eye · MXBI eye tracker')
         self.resize(1350,870)
         self.setMinimumSize(980,650)
@@ -125,7 +130,7 @@ class Window(W.QMainWindow):
         self.rate_last=(time.monotonic(),0,0)
         self.rates=(0,0)
         self._closing=False
-        self.saved_source_path=config['source']['path']
+        self.saved_source_path=config.value.source.path
         self.pending_video_path=None
         central=W.QWidget()
         self.setCentralWidget(central)
@@ -136,8 +141,9 @@ class Window(W.QMainWindow):
         toolbar.addWidget(label('MXBI  /  PUPIL + CR','muted'))
         toolbar.addStretch()
         self.source=W.QComboBox()
-        self.source.addItems(['Camera','Video','Simulation'])
-        self.source.setCurrentText(config['source']['mode'].title())
+        for caption,mode in [('Camera',SourceMode.CAMERA),('Video',SourceMode.VIDEO),('Simulation',SourceMode.SIMULATION)]:
+            self.source.addItem(caption,mode.value)
+        self.source.setCurrentIndex(max(0,self.source.findData(config.value.source.mode.value)))
         toolbar.addWidget(self.source)
         self.open_button=W.QPushButton('Open video…')
         self.open_button.clicked.connect(self.open_video)
@@ -166,8 +172,8 @@ class Window(W.QMainWindow):
         files.addWidget(camera_button)
         self.camera=W.QSpinBox()
         self.camera.setRange(0,99)
-        self.camera.setValue(config['source']['camera'])
-        self.requested_fps=label(f"Requested {config['source']['fps']:g} fps",'muted')
+        self.camera.setValue(config.value.source.camera)
+        self.requested_fps=label(f"Requested {config.value.source.fps:g} fps",'muted')
         files.addWidget(self.requested_fps)
         layout.addLayout(files)
         self.source_label=label(self.saved_source_path or 'Live camera · full video is recorded during each session','muted')
@@ -187,9 +193,9 @@ class Window(W.QMainWindow):
         output_row.setContentsMargins(0,0,0,0)
         output_row.addWidget(label('Pupil-only output','muted'))
         self.coordinates=W.QComboBox()
-        self.coordinates.addItem('Absolute · full image','absolute')
-        self.coordinates.addItem('Relative · yellow ROI','relative')
-        self.coordinates.setCurrentIndex(max(0,self.coordinates.findData(config['tracking'].get('pupil_coordinates','absolute'))))
+        self.coordinates.addItem('Absolute · full image',PupilCoordinates.ABSOLUTE.value)
+        self.coordinates.addItem('Relative · yellow ROI',PupilCoordinates.RELATIVE.value)
+        self.coordinates.setCurrentIndex(max(0,self.coordinates.findData(config.value.tracking.pupil_coordinates.value)))
         self.coordinates.setToolTip('Pupil-only X/Y output: absolute uses the full-image top-left; relative uses the yellow ROI top-left. Applies to plots, saved samples and SDK. A moving ROI changes the relative origin.')
         self.coordinates.currentIndexChanged.connect(self.schedule_parameters)
         output_row.addWidget(self.coordinates)
@@ -202,11 +208,12 @@ class Window(W.QMainWindow):
         self.eye=EyeView(crop=True)
         def toggle(text,key,default=True,color=None):
             box=W.QCheckBox(text)
-            box.setChecked(config['display'].get(key,default))
+            value=getattr(config.value.display,key)
+            box.setChecked(default if value is None else value)
             if color: box.setStyleSheet('color:'+color+';')
             return box
-        self.pupil_mask=toggle('Pupil','pupil_mask',config['display']['masks'],'#67b5ff')
-        self.cr_mask=toggle('CR','cr_mask',config['display']['masks'],'#ff8585')
+        self.pupil_mask=toggle('Pupil','pupil_mask',config.value.display.masks,'#67b5ff')
+        self.cr_mask=toggle('CR','cr_mask',config.value.display.masks,'#ff8585')
         self.crosshairs=toggle('Centers','crosshairs')
         self.circle=toggle('Template size','template_circle',True,'#d777df')
         self.inset=toggle('Template inset','template_inset')
@@ -234,7 +241,7 @@ class Window(W.QMainWindow):
         plot_layout=W.QVBoxLayout(plot_panel)
         plot_layout.setContentsMargins(0,0,0,0)
         plot_layout.addWidget(self.coordinates_row)
-        self.coordinates_row.setVisible(config['tracking']['tracking_mode']=='Pupil only')
+        self.coordinates_row.setVisible(config.value.tracking.tracking_mode is TrackingMode.PUPIL_ONLY)
         plots=W.QSplitter(C.Qt.Horizontal)
         pg.setConfigOptions(antialias=False,background='#10151d',foreground='#93a5bd')
         self.trace=pg.PlotWidget(title='Eye signal · pixels')
@@ -272,7 +279,7 @@ class Window(W.QMainWindow):
         self.speed.setRange(.05,8)
         self.speed.setSingleStep(.25)
         self.speed.setSuffix('×')
-        self.speed.setValue(config['source']['speed'])
+        self.speed.setValue(config.value.source.speed)
         self.speed.setKeyboardTracking(False)
         self.speed.valueChanged.connect(lambda value:self.call('speed',speed=value))
         playback.addWidget(self.speed)
@@ -290,10 +297,10 @@ class Window(W.QMainWindow):
         body.setContentsMargins(5,0,5,0)
         sidebar.setWidget(controls)
         self.mode=W.QComboBox()
-        self.mode.addItems(['Pupil + CR','Pupil only'])
-        self.mode.setCurrentText(config['tracking']['tracking_mode'])
+        self.mode.addItems([mode.value for mode in TrackingMode])
+        self.mode.setCurrentText(config.value.tracking.tracking_mode.value)
         self.mode.currentTextChanged.connect(self.schedule_parameters)
-        self.mode.currentTextChanged.connect(lambda mode:self.coordinates_row.setVisible(mode=='Pupil only'))
+        self.mode.currentTextChanged.connect(lambda mode:self.coordinates_row.setVisible(TrackingMode(mode) is TrackingMode.PUPIL_ONLY))
         mode_row=W.QHBoxLayout()
         mode_row.addWidget(label('Tracking mode','muted'))
         mode_row.addWidget(self.mode,1)
@@ -309,7 +316,7 @@ class Window(W.QMainWindow):
             section=Section(title,opened)
             body.addWidget(section)
             for key,text,lo,hi,step in rows:
-                param=Parameter(text,config['tracking'][key],lo,hi,step)
+                param=Parameter(text,getattr(config.value.tracking,key),lo,hi,step)
                 for widget in (param,param.spin,param.slider): widget.setToolTip(TIPS[key])
                 for caption in param.findChildren(W.QLabel): caption.setToolTip(TIPS[key])
                 self.parameters[key]=param
@@ -319,7 +326,7 @@ class Window(W.QMainWindow):
                 section.body.addWidget(param)
             if title=='Template / ROI':
                 self.template_on=W.QCheckBox('Follow template')
-                self.template_on.setChecked(config['tracking']['template_tracking'])
+                self.template_on.setChecked(config.value.tracking.template_tracking)
                 self.template_on.toggled.connect(self.schedule_parameters)
                 section.body.addWidget(self.template_on)
                 clear=W.QPushButton('Clear template')
@@ -347,6 +354,15 @@ class Window(W.QMainWindow):
         add_tooltips(self)
         W.QApplication.instance().installEventFilter(self)
 
+    def source_mode(self):
+        return SourceMode(self.source.currentData())
+
+    def tracking_mode(self):
+        return TrackingMode(self.mode.currentText())
+
+    def pupil_coordinates(self):
+        return PupilCoordinates(self.coordinates.currentData())
+
     def call(self,command,callback=None,**args):
         self.pending.append((self.service.submit(command,**args),callback))
 
@@ -355,15 +371,19 @@ class Window(W.QMainWindow):
             self.param_timer.start(80)
 
     def send_parameters(self):
-        values={k:p.spin.value() for k,p in self.parameters.items()}
-        values.update(tracking_mode=self.mode.currentText(),pupil_coordinates=self.coordinates.currentData(),template_tracking=self.template_on.isChecked())
-        self.call('config',tracking=values)
+        tracking=self.service.config.value.tracking.model_copy(deep=True)
+        for key,param in self.parameters.items():
+            setattr(tracking,key,param.spin.value())
+        tracking.tracking_mode=self.tracking_mode()
+        tracking.pupil_coordinates=self.pupil_coordinates()
+        tracking.template_tracking=self.template_on.isChecked()
+        self.call('config',tracking=tracking)
 
     def open_video(self):
         path,_=W.QFileDialog.getOpenFileName(self,'Open eye video','','Video (*.mp4 *.avi *.mkv *.mov *.m4v);;All files (*)')
         if path:
             self.saved_source_path=path
-            self.source.setCurrentText('Video')
+            self.source.setCurrentIndex(max(0,self.source.findData(SourceMode.VIDEO.value)))
             self.source_label.setText(path)
             self.full.reset_zoom()
             self.pending_video_path=path
@@ -372,20 +392,25 @@ class Window(W.QMainWindow):
 
     def start(self):
         self.send_parameters()
-        config=copy.deepcopy(self.service.config)
-        config['source'].update(mode=self.source.currentText().lower(),path=self.saved_source_path,
-                                camera=self.camera.value(),speed=self.speed.value())
-        config['tracking'].update({k:p.spin.value() for k,p in self.parameters.items()})
-        config['tracking'].update(tracking_mode=self.mode.currentText(),pupil_coordinates=self.coordinates.currentData(),template_tracking=self.template_on.isChecked())
+        config=cfg.MxEyeConfigStore(self.service.config.value.model_copy(deep=True))
+        config.value.source.mode=self.source_mode()
+        config.value.source.path=self.saved_source_path
+        config.value.source.camera=self.camera.value()
+        config.value.source.speed=self.speed.value()
+        for key,param in self.parameters.items():
+            setattr(config.value.tracking,key,param.spin.value())
+        config.value.tracking.tracking_mode=self.tracking_mode()
+        config.value.tracking.pupil_coordinates=self.pupil_coordinates()
+        config.value.tracking.template_tracking=self.template_on.isChecked()
         self.call('settings',config=config,callback=lambda:self.call('start'))
 
     def settings(self):
-        config=copy.deepcopy(self.service.config)
-        config['source'].update(camera=self.camera.value())
+        config=cfg.MxEyeConfigStore(self.service.config.value.model_copy(deep=True))
+        config.value.source.camera=self.camera.value()
         dialog=Settings(config,self)
         if dialog.exec()==W.QDialog.Accepted:
-            self.camera.setValue(dialog.config['source']['camera'])
-            self.requested_fps.setText(f"Requested {dialog.config['source']['fps']:g} fps")
+            self.camera.setValue(dialog.config.value.source.camera)
+            self.requested_fps.setText(f"Requested {dialog.config.value.source.fps:g} fps")
             self.call('settings',config=dialog.config)
 
     def pause_changed(self,paused):
@@ -418,7 +443,7 @@ class Window(W.QMainWindow):
 
     def view_action(self,command,args):
         if self.navigation_pending is not None: return
-        if self.service.config['source']['mode']=='video' and self.last_payload is not None:
+        if self.service.config.value.source.mode is SourceMode.VIDEO and self.last_payload is not None:
             # Freeze precisely the displayed frame before acting on its pixels.
             self.navigate_video('seek',frame=self.last_payload['source_index'])
             self.deferred_video_action=(command,args)
@@ -437,27 +462,35 @@ class Window(W.QMainWindow):
     def save_config(self):
         path,_=W.QFileDialog.getSaveFileName(self,'Save configuration','mx_eye_config.json','JSON (*.json)')
         if path:
-            config=copy.deepcopy(self.service.config)
-            config['display'].update(pupil_mask=self.pupil_mask.isChecked(),cr_mask=self.cr_mask.isChecked(),
-                crosshairs=self.crosshairs.isChecked(),template_circle=self.circle.isChecked(),template_inset=self.inset.isChecked())
-            config['source'].update(mode=self.source.currentText().lower(),path=self.saved_source_path,
-                camera=self.camera.value(),speed=self.speed.value())
-            config['tracking'].update({k:p.spin.value() for k,p in self.parameters.items()})
-            config['tracking'].update(tracking_mode=self.mode.currentText(),pupil_coordinates=self.coordinates.currentData(),template_tracking=self.template_on.isChecked())
+            config=cfg.MxEyeConfigStore(self.service.config.value.model_copy(deep=True))
+            config.value.display.pupil_mask=self.pupil_mask.isChecked()
+            config.value.display.cr_mask=self.cr_mask.isChecked()
+            config.value.display.crosshairs=self.crosshairs.isChecked()
+            config.value.display.template_circle=self.circle.isChecked()
+            config.value.display.template_inset=self.inset.isChecked()
+            config.value.source.mode=self.source_mode()
+            config.value.source.path=self.saved_source_path
+            config.value.source.camera=self.camera.value()
+            config.value.source.speed=self.speed.value()
+            for key,param in self.parameters.items():
+                setattr(config.value.tracking,key,param.spin.value())
+            config.value.tracking.tracking_mode=self.tracking_mode()
+            config.value.tracking.pupil_coordinates=self.pupil_coordinates()
+            config.value.tracking.template_tracking=self.template_on.isChecked()
             try:
-                cfg.save(path,config)
+                config.save(Path(path))
             except (ValueError,OSError) as exc:
                 W.QMessageBox.warning(self,'Cannot save',str(exc))
 
     def save_template(self):
-        template=self.service.config.get('template')
+        template=self.service.config.value.template
         if not template:
             W.QMessageBox.information(self,'Template','Right click the source video to capture a template first.')
             return
         path,_=W.QFileDialog.getSaveFileName(self,'Save template','template.png','PNG (*.png)')
         if path:
             try:
-                Path(path).write_bytes(base64.b64decode(template['png']))
+                Path(path).write_bytes(base64.b64decode(template.png))
             except (ValueError,OSError) as exc:
                 W.QMessageBox.warning(self,'Cannot save template',str(exc))
 
@@ -470,14 +503,19 @@ class Window(W.QMainWindow):
             ok,encoded=cv2.imencode('.png',patch)
             if not ok: raise ValueError('Cannot encode template.')
             r=(self.last_payload or {}).get('result',{})
-            x,y,w,h=r.get('roi',self.service.config['tracking']['roi'])
-            existing=self.service.config.get('template') or {}
-            center=r.get('template_center') or existing.get('center') or [x+w/2,y+h/2]
-            anchor=r.get('template_anchor') or existing.get('anchor') or center
+            x,y,w,h=r.get('roi',self.service.config.value.tracking.roi)
+            existing=self.service.config.value.template
+            center=r.get('template_center') or (existing.center if existing else None) or [x+w/2,y+h/2]
+            anchor=r.get('template_anchor') or (existing.anchor if existing else None) or center
             self.parameters['template_radius'].set_value(max(6,min(150,(min(patch.shape)-1)//2)))
             self.template_on.setChecked(True)
             self.send_parameters()
-            self.call('load_template',template=dict(png=base64.b64encode(encoded).decode('ascii'),anchor=anchor,center=center))
+            template=cfg.TemplateConfig(
+                png=base64.b64encode(encoded).decode('ascii'),
+                anchor=anchor,
+                center=center,
+            )
+            self.call('load_template',template=template)
         except (ValueError,OSError,cv2.error) as exc:
             W.QMessageBox.warning(self,'Cannot load template',str(exc))
 
@@ -488,27 +526,28 @@ class Window(W.QMainWindow):
         path,_=W.QFileDialog.getOpenFileName(self,'Load configuration','','JSON (*.json)')
         if path:
             try:
-                config=cfg.load(path)
+                config=cfg.MxEyeConfigStore.load(Path(path))
             except (OSError,ValueError,KeyError) as exc:
                 W.QMessageBox.warning(self,'Cannot load',str(exc))
                 return
             self.call('settings',config=config)
-            self.source.setCurrentText(config['source']['mode'].title())
-            self.saved_source_path=config['source']['path']
+            self.source.setCurrentIndex(max(0,self.source.findData(config.value.source.mode.value)))
+            self.saved_source_path=config.value.source.path
             self.source_label.setText(self.saved_source_path)
-            self.mode.setCurrentText(config['tracking']['tracking_mode'])
-            self.coordinates.setCurrentIndex(max(0,self.coordinates.findData(config['tracking'].get('pupil_coordinates','absolute'))))
+            self.mode.setCurrentText(config.value.tracking.tracking_mode.value)
+            self.coordinates.setCurrentIndex(max(0,self.coordinates.findData(config.value.tracking.pupil_coordinates.value)))
             for key,param in self.parameters.items():
-                param.set_value(config['tracking'][key])
-            self.template_on.setChecked(config['tracking']['template_tracking'])
-            self.camera.setValue(config['source']['camera'])
-            self.requested_fps.setText(f"Requested {config['source']['fps']:g} fps")
-            with C.QSignalBlocker(self.speed): self.speed.setValue(config['source']['speed'])
-            for box,key,default in [(self.pupil_mask,'pupil_mask',config['display']['masks']),
-                                    (self.cr_mask,'cr_mask',config['display']['masks']),
+                param.set_value(getattr(config.value.tracking,key))
+            self.template_on.setChecked(config.value.tracking.template_tracking)
+            self.camera.setValue(config.value.source.camera)
+            self.requested_fps.setText(f"Requested {config.value.source.fps:g} fps")
+            with C.QSignalBlocker(self.speed): self.speed.setValue(config.value.source.speed)
+            for box,key,default in [(self.pupil_mask,'pupil_mask',config.value.display.masks),
+                                    (self.cr_mask,'cr_mask',config.value.display.masks),
                                     (self.crosshairs,'crosshairs',True),(self.circle,'template_circle',True),
                                     (self.inset,'template_inset',True)]:
-                box.setChecked(config['display'].get(key,default))
+                value=getattr(config.value.display,key)
+                box.setChecked(default if value is None else value)
 
     def refresh(self):
         for future,callback in list(self.pending):
@@ -525,19 +564,19 @@ class Window(W.QMainWindow):
                     self.eye.setEnabled(True)
                     W.QMessageBox.warning(self,'mx_eye',str(exc) or f'{type(exc).__name__}: the operation could not complete.')
         state=self.service.snapshot()
+        mode=self.source_mode()
         if self.pending_video_path and not self.service.run and not self.pending:
-            if self.source.currentText()=='Video' and self.saved_source_path==self.pending_video_path:
+            if mode is SourceMode.VIDEO and self.saved_source_path==self.pending_video_path:
                 self.pending_video_path=None
                 self.start()
             else:
                 self.pending_video_path=None
-        mode=self.source.currentText()
-        self.source_label.setText(self.saved_source_path if mode=='Video' else
-            ('Artificial eye · no camera required' if mode=='Simulation' else
+        self.source_label.setText(self.saved_source_path if mode is SourceMode.VIDEO else
+            ('Artificial eye · no camera required' if mode is SourceMode.SIMULATION else
              'Live camera · full video is recorded during each session'))
-        if mode=='Camera' and state.source.get('width'):
+        if mode is SourceMode.CAMERA and state.source.get('width'):
             info=state.source
-            name=self.service.config['source'].get('camera_name') or f"Camera {self.camera.value()}"
+            name=f"Camera {self.camera.value()}"
             camera_mode=f"{info['width']} × {info['height']} · {info.get('actual_format','unknown format')}"
             if info.get('driver_fps') is not None:
                 camera_mode+=f" · driver {info['driver_fps']:g} fps"
@@ -547,15 +586,15 @@ class Window(W.QMainWindow):
             widget.setEnabled(not active and not self.pending)
         self.open_button.setEnabled(not self.pending and not self._closing)
         self.stop_button.setEnabled(active)
-        video=active and self.service.config['source']['mode']=='video'
+        video=active and self.service.config.value.source.mode is SourceMode.VIDEO
         if not video:
             self.navigation_pending=None
             self.queued_seek=None
             self.deferred_video_action=None
             self.full.setEnabled(True)
             self.eye.setEnabled(True)
-        self.coordinates.setEnabled(self.mode.currentText()=='Pupil only')
-        self.speed.setEnabled(mode=='Video' and state.state!='stopping')
+        self.coordinates.setEnabled(self.tracking_mode() is TrackingMode.PUPIL_ONLY)
+        self.speed.setEnabled(mode is SourceMode.VIDEO and state.state!='stopping')
         for widget in (self.pause,self.back,self.step,self.timeline): widget.setEnabled(video)
         self.pause.setEnabled(video and self.navigation_pending is None)
         if video and not self.pending and self.navigation_pending is None:
@@ -595,8 +634,11 @@ class Window(W.QMainWindow):
         else:
             payload=self.last_payload
         r=payload['result']
+        full_params=payload['tracking'].model_copy(
+            update={'template_radius':self.parameters['template_radius'].spin.value()}
+        )
         self.full.set_frame(payload['frame'],r,scale=payload['scale'],crosshairs=self.crosshairs.isChecked(),
-                            params={**payload['tracking'],'template_radius':self.parameters['template_radius'].spin.value()},
+                            params=full_params,
                             template=payload['template'],circle=self.circle.isChecked(),inset=self.inset.isChecked())
         self.eye.set_frame(payload['crop'],r,origin=r['roi'][:2],
                            pupil_mask=self.pupil_mask.isChecked(),cr_mask=self.cr_mask.isChecked(),
@@ -622,18 +664,18 @@ class Window(W.QMainWindow):
                 self.deferred_video_action=None
                 self.call(command,**args)
         tracking=payload['tracking']
-        signature=(tracking['tracking_mode'],tracking.get('pupil_coordinates','absolute') if tracking['tracking_mode']=='Pupil only' else '')
+        signature=(tracking.tracking_mode,tracking.pupil_coordinates if tracking.tracking_mode is TrackingMode.PUPIL_ONLY else None)
         if signature!=self.output_signature:
             self.output_signature=signature
             self.history.clear()
             self.last_history_frame=None
-            description='Pupil − CR' if signature[0]!='Pupil only' else ('ROI-relative pupil' if signature[1]=='relative' else 'Absolute pupil')
+            description='Pupil − CR' if signature[0] is not TrackingMode.PUPIL_ONLY else ('ROI-relative pupil' if signature[1] is PupilCoordinates.RELATIVE else 'Absolute pupil')
             self.trace.setTitle(description+' · pixels')
             self.xy.setTitle(description+' · X/Y')
         if fresh_payload and payload['revision'] >= self.service.revision and not self.param_timer.isActive() and not self.pending:
-            for key,param in self.parameters.items(): param.set_value(payload['tracking'][key])
+            for key,param in self.parameters.items(): param.set_value(getattr(tracking,key))
             with C.QSignalBlocker(self.template_on):
-                self.template_on.setChecked(payload['tracking']['template_tracking'])
+                self.template_on.setChecked(tracking.template_tracking)
         if payload['frame_id']!=self.last_history_frame:
             self.history.append((time.monotonic(),r['x'],r['y']))
             self.last_history_frame=payload['frame_id']
