@@ -129,7 +129,7 @@ Each session gets a unique subfolder under the configured output directory:
 |---|---|
 | `video.avi` | MJPG full-frame video; fast, lossy compression, no overlays |
 | `video.mkv` | Alternative FFV1 lossless full-frame video; more CPU demand |
-| `frames.csv` | Video index, acquired source-frame ID, host acquisition timestamp, media time |
+| `frames.csv` | Video index, acquired source-frame ID, shared wall-clock acquisition timestamp, media time |
 | `tracking.csv` | Every locally logged tracking sample, with timestamps, coordinates and flags |
 | `config.json` | Configuration at session start |
 | `session.json` | Final counts, completion status and any detected fault |
@@ -256,6 +256,45 @@ packages are outside this check. Use
 `uv run pyright --verifytypes mx_eye_protocol --ignoreexternal` to check public
 API type completeness without evaluating external dependencies.
 
+## Clock synchronization (direct link)
+
+The consumer device and the mx_eye host are connected by a single Ethernet
+cable with no internet: the consumer device is the **NTP server**, the mx_eye
+host is the **chrony client**. Two small scripts cover install and verification:
+
+```bash
+sudo scripts/install-chrony-client.sh 192.168.50.1   # configure the client
+scripts/check-chrony-client.sh                       # wait and verify
+bash scripts/install-chrony-client.sh --dry-run 192.168.50.1   # review only
+```
+
+`install-chrony-client.sh` installs chrony with `apt-get` when `chronyd` is
+missing, disables `systemd-timesyncd`, keeps the first `/etc/chrony/chrony.conf`
+it finds at `.bak`, writes the configuration below and restarts the service.
+`--dry-run` prints that file and changes nothing. The script writes exactly one
+source, and the argument must be an address or hostname so it cannot become
+configuration syntax:
+
+```text
+server <NTP-SERVER> iburst minpoll 0 maxpoll 3 prefer
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+rtcsync
+```
+
+Distribution pool servers are dropped: on an isolated link they are unreachable
+noise. A Raspberry Pi has no battery-backed RTC, so `makestep 1.0 3` steps the
+clock during the first three updates after startup; later corrections slew.
+
+`check-chrony-client.sh` waits with `chronyc -n waitsync 30 0.05 1.0 1`, then
+prints `chronyc -n tracking` and the source list; it exits non-zero when no
+source is usable. Neither script configures network addresses (the direct link
+needs valid IP settings on both ends) or the consumer side. The server must
+accept this host: a chrony server needs `allow <mx_eye address>` (or the link
+subnet), and Windows `w32time` needs its NtpServer mode enabled. Verify with the
+check script: the Reference ID is the consumer device, the stratum is one hop
+above it, and `Leap status: Normal`.
+
 ## Delay readouts
 
 | Readout | Definition |
@@ -266,14 +305,20 @@ API type completeness without evaluating external dependencies.
 | Arrival age | Receiver receipt minus acquisition |
 | Age now | Current receiver time minus acquisition |
 
-Each end reads its own system clock and the SDK subtracts the two timestamps
-directly; no application-level offset is estimated or applied. Delay readouts are
-therefore only meaningful when both ends are in **one clock domain**: the same
-machine, or separate machines synchronized by system-level NTP or PTP. The tracker
-does not maintain a sync port, RTT probes, offset estimation or resynchronization
-logic; that is infrastructure, not part of `mx_eye`. On separate hosts without
-NTP/PTP the readouts are meaningless, and `latest(max_age_ms=...)` will reject
-samples whose age cannot be certified.
+Every packet timestamp comes from `time.time_ns()` (CLOCK_REALTIME, Unix epoch)
+and each end subtracts the two timestamps directly; no application-level offset
+is estimated or applied. Delay readouts are therefore only meaningful when both
+ends are in **one clock domain**: the same machine, or separate machines
+synchronized as described above. The tracker does not maintain a sync port, RTT
+probes, offset estimation or resynchronization logic; that is infrastructure,
+not part of `mx_eye`. On separate hosts without NTP/PTP the readouts are
+meaningless, and `latest(max_age_ms=...)` will reject samples whose age cannot be
+certified.
+
+CLOCK_REALTIME can step by a leap second, which may make a single sample look
+stale; later samples recover on their own. Playback pacing, recording flush
+deadlines and GUI refresh keep using `time.monotonic()`, because they measure
+elapsed time inside one process rather than a shared time base.
 
 A timestamp ahead of the receiver clock means the ends are not reading the same
 clock, so such a sample is not certified fresh; `latest(max_age_ms=None,

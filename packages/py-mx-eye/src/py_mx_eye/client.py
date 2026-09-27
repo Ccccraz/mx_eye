@@ -47,7 +47,7 @@ class Client:
         buffer_samples: int = 4096,
         timeout: float = 3.0,
         *,
-        now: Callable[[], int] = time.perf_counter_ns,
+        now: Callable[[], int] = time.time_ns,
     ) -> None:
         self.host, self.data_port = host, data_port
         self.control_port = control_port

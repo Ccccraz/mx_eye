@@ -1,7 +1,7 @@
 """Received sample and its pure receiver-local timing arithmetic.
 
-The ``*_at`` methods take the caller's monotonic timestamp so freshness and age
-can be evaluated deterministically; the properties use ``perf_counter_ns``.
+The ``*_at`` methods take the caller's timestamp so freshness and age can be
+evaluated deterministically; the properties read the shared wall clock.
 
 Age and delay compare a frame timestamp with receiver time directly, so the
 tracker and the receiver must read the same system clock (one host, or hosts
@@ -37,7 +37,7 @@ class Sample:
     @property
     def age_ms(self) -> float:
         """Age now, including time the sample has waited in the user's code."""
-        return self.age_ms_at(time.perf_counter_ns())
+        return self.age_ms_at(time.time_ns())
 
     def is_fresh_at(
         self,

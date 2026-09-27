@@ -179,7 +179,7 @@ class SampleReceiver:
         port: int,
         udp_bind: str,
         max_samples: int,
-        now: Callable[[], int] = time.perf_counter_ns,
+        now: Callable[[], int] = time.time_ns,
         connect: Connector = socket.create_connection,
         datagram: Callable[[int, int], socket.socket] = socket.socket,
     ) -> None:

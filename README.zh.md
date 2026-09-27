@@ -34,6 +34,19 @@ uv run mx-eye --demo
 **Start tracker** 和 **Stop tracker** 按钮控制同一个会话。
 当会话已在运行时，START 是幂等的。也可以先连接客户端，再从中启动会话。
 
+## 时钟同步
+
+追踪器与消费端设备通过系统级 NTP 共用一个时基；时延与 age 读数直接对报文
+时间戳做减法。在消费端设备作为 NTP server 的网线直连场景下，在 mx_eye 侧
+设备上执行一次（Raspberry Pi OS/Debian，chrony）：
+
+```bash
+sudo scripts/install-chrony-client.sh 192.168.50.1   # 消费端设备地址
+scripts/check-chrony-client.sh                       # 等待并校验同步
+```
+
+更多细节见 AGENTS.md。
+
 ## SDK
 
 SDK 即 `py-mx-eye` 包；`uv sync --all-extras` 会安装它。

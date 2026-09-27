@@ -52,7 +52,7 @@ def _payload(sequence: int) -> TrackingPayload:
 
 def _fresh_payload(sequence: int, flags: TrackingFlags = TrackingFlags.VALID):
     """A payload stamped now, as a live tracker would send it."""
-    stamp = time.perf_counter_ns()
+    stamp = time.time_ns()
     return replace(_payload(sequence), acquisition_ns=stamp, send_ns=stamp, flags=flags)
 
 
@@ -388,7 +388,7 @@ def test_client_receives_published_frames():
             stale = DataFrame.from_payload(
                 replace(
                     _fresh_payload(2),
-                    acquisition_ns=time.perf_counter_ns() - 5_000_000_000,
+                    acquisition_ns=time.time_ns() - 5_000_000_000,
                 )
             ).encode()
             assert _deliver(publisher, client, stale, 2)

@@ -34,7 +34,9 @@ class TrackingFlags(IntFlag):
 class TrackingPayload:
     """One tracking sample, independent of its serialized representation.
 
-    Timestamps except media_ns use the tracker's monotonic clock, not UTC.
+    Timestamps except media_ns are nanoseconds from the shared wall clock
+    (CLOCK_REALTIME, Unix epoch), aligned between hosts by system-level NTP or
+    PTP; they are not a monotonic uptime clock. media_ns is a media position.
     Coordinates are uncalibrated source-image pixels: x rightward, y downward.
     Missing detections and invalid output coordinates are represented by NaN.
     """

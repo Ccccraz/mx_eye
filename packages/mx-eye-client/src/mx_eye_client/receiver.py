@@ -170,8 +170,10 @@ class Receiver(W.QWidget):
             self.state.setText(stats.error)
         if self.history:
             data = np.asarray(self.history)
-            data = data[data[:, 0] >= time.perf_counter() - 8]
-            t = data[:, 0] - time.perf_counter()
+            # Sample timestamps and this window share the tracker's wall clock.
+            wall = time.time_ns() / 1e9
+            data = data[data[:, 0] >= wall - 8]
+            t = data[:, 0] - wall
             self.x.setData(t, data[:, 1], connect="finite")
             self.y.setData(t, data[:, 2], connect="finite")
             self.delay.setData(t, data[:, 3], connect="finite")
