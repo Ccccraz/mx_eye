@@ -1,8 +1,6 @@
 """Small simulated MXBI consumer. All communication goes through the SDK."""
-import argparse
 import concurrent.futures
 import math
-import sys
 import time
 from collections import deque
 
@@ -10,8 +8,8 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore as C, QtWidgets as W
 
-from .sdk import Client
-from .widgets import STYLE, label
+from py_mx_eye import Client
+from .style import label
 
 class Receiver(W.QWidget):
     def __init__(self,host,data_port,control_port,sync_port):
@@ -141,20 +139,3 @@ class Receiver(W.QWidget):
         self.executor.shutdown(wait=True,cancel_futures=True)
         if self.client: self.client.close()
         event.accept()
-
-def main():
-    parser=argparse.ArgumentParser(description='mx_eye SDK receiver demonstration')
-    parser.add_argument('--host',default='127.0.0.1')
-    parser.add_argument('--data-port',type=int,default=5556)
-    parser.add_argument('--control-port',type=int,default=5557)
-    parser.add_argument('--sync-port',type=int,default=5558)
-    args=parser.parse_args()
-    app=W.QApplication.instance() or W.QApplication(sys.argv)
-    app.setStyle('Fusion')
-    app.setStyleSheet(STYLE)
-    window=Receiver(args.host,args.data_port,args.control_port,args.sync_port)
-    window.show()
-    return app.exec()
-
-if __name__=='__main__':
-    raise SystemExit(main())

@@ -10,6 +10,9 @@ dependencies = [
     "pyside6>=6.6,<7",
 ]
 
+[project.scripts]
+mx-eye-receiver = 'mx_eye_client.__main__:main'
+
 [build-system]
 requires = ['uv_build>=0.12.19,<0.13.0']
 build-backend = 'uv_build'

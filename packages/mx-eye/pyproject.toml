@@ -1,7 +1,7 @@
 [project]
 name = 'mx-eye'
 version = '0.1.0'
-description = 'MXBI pupil and corneal reflection tracker and receiver SDK'
+description = 'MXBI pupil and corneal reflection tracker'
 requires-python = '>=3.10'
 dependencies = [
     "mx-eye-protocol",
@@ -13,7 +13,6 @@ test = ['pytest>=8,<10']
 
 [project.scripts]
 mx-eye = 'mx_eye.__main__:main'
-mx-eye-receiver = 'mx_eye.receiver:main'
 
 [build-system]
 requires = ['uv_build>=0.12.19,<0.13.0']

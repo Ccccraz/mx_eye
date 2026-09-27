@@ -3,6 +3,7 @@
 Client receives continuously even when the caller is busy drawing. Cross-host
 age is estimated with a four-timestamp exchange, not by comparing raw clocks.
 """
+import json
 import math
 import socket
 import threading
@@ -12,7 +13,22 @@ from dataclasses import dataclass
 
 from mx_eye_protocol.control import CMD_START, CMD_STATUS, CMD_STOP, CMD_SYNC, Request, Reply
 from mx_eye_protocol.packets import PACKET, PUPIL_ONLY, ROI_RELATIVE, VALID, decode
-from .transport import receive_json, send_json
+
+# Client-side copy of the framed-JSON control helpers; the tracker keeps its own
+# implementation in mx_eye/transport.py.
+def receive_json(sock):
+    data = bytearray()
+    while b'\n' not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise ConnectionError('Peer closed before replying')
+        data.extend(chunk)
+        if len(data) > 16384:
+            raise ValueError('Control message is too large')
+    return json.loads(data.split(b'\n',1)[0])
+
+def send_json(sock, obj):
+    sock.sendall(json.dumps(obj,allow_nan=False).encode('utf-8')+b'\n')
 
 @dataclass(frozen=True)
 class Sample:
