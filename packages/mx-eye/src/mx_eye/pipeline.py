@@ -6,6 +6,7 @@ import json
 import math
 import os
 import queue
+import shutil
 import signal
 import socket
 import time
@@ -29,6 +30,9 @@ from .config import (
     Transport,
 )
 from .recording import TRACKING_COLUMNS, tracking_row
+from .recording import MjpegCopyWriter
+from .camera_backend import backend_for, camera_target, apply_controls
+from .config import TrackingConfig
 from .tracking import Tracker
 from .transport import Publisher
 from .video import VideoReader
@@ -49,7 +53,8 @@ class Mailbox:
             return False
         try:
             np.frombuffer(self.pixels, np.uint8)[: frame.size] = frame.reshape(-1)
-            self.meta[:] = [*meta, *frame.shape[:2]]
+            shape = (-1, frame.size) if frame.ndim == 1 else frame.shape[:2]
+            self.meta[:] = [*meta, *shape]
             return True
         finally:
             self.lock.release()
@@ -61,11 +66,9 @@ class Mailbox:
             fid, acquired, media, source_index, navigation_id, h, w = self.meta[:]
             if fid <= after:
                 return None
-            frame = (
-                np.frombuffer(self.pixels, np.uint8)[: h * w * 3]
-                .reshape(h, w, 3)
-                .copy()
-            )
+            pixels = np.frombuffer(self.pixels, np.uint8)
+            frame = (pixels[:w].copy() if h == -1 else
+                     pixels[:h * w * 3].reshape(h, w, 3).copy())
             return frame, (fid, acquired, media, source_index, navigation_id)
         finally:
             self.lock.release()
@@ -74,7 +77,7 @@ class Mailbox:
 class FrameRing:
     """Single-producer/single-consumer bounded FIFO, with explicit slot ownership.
 
-    Disk I/O happens only after get() has copied and released its shared slot.
+    The writer borrows a slot while writing, then explicitly releases it.
     Semaphores synchronize frame bytes/metadata without reading torn frames.
     """
 
@@ -93,26 +96,30 @@ class FrameRing:
         np.frombuffer(
             self.pixels, np.uint8, count=frame.size, offset=i * self.max_bytes
         )[:] = frame.reshape(-1)
-        self.meta[i * 5 : i * 5 + 5] = [*meta, *frame.shape[:2]]
+        shape = (-1, frame.size) if frame.ndim == 1 else frame.shape[:2]
+        self.meta[i * 5 : i * 5 + 5] = [*meta, *shape]
         self.write_index += 1
         self.ready.release()
         return True
 
-    def get(self, timeout=0.02):
+    def get(self, timeout=0.02, copy=True):
         if not self.ready.acquire(timeout=timeout):
             return None
         i = self.read_index % self.capacity
         fid, acquired, media, h, w = self.meta[i * 5 : i * 5 + 5]
-        frame = (
-            np.frombuffer(
-                self.pixels, np.uint8, count=h * w * 3, offset=i * self.max_bytes
-            )
-            .reshape(h, w, 3)
-            .copy()
-        )
+        frame = np.frombuffer(self.pixels, np.uint8,
+                              count=w if h == -1 else h * w * 3,
+                              offset=i * self.max_bytes)
+        if h != -1:
+            frame = frame.reshape(h, w, 3)
         self.read_index += 1
-        self.free.release()
+        if copy:
+            frame = frame.copy()
+            self.free.release()
         return frame, (fid, acquired, media)
+
+    def release(self):
+        self.free.release()
 
 
 class PreviewMailbox:
@@ -125,11 +132,12 @@ class PreviewMailbox:
     def __init__(self, ctx, max_bytes):
         self.pixels = ctx.RawArray("B", max_bytes)
         self.metadata = ctx.RawArray("B", 32768)
-        self.header = ctx.RawArray("q", 4)  # revision, JSON bytes, height, width
+        self.evidence = ctx.RawArray("B", max_bytes // 3)
+        self.header = ctx.RawArray("q", 5)  # revision, JSON bytes, height, width, evidence
         self.lock = ctx.Lock()
         self.last_read = 0
 
-    def put(self, frame, payload):
+    def put(self, frame, payload, pupil_evidence=None):
         raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         if len(raw) > len(self.metadata) or not self.lock.acquire(False):
             return False
@@ -138,7 +146,10 @@ class PreviewMailbox:
             np.frombuffer(self.metadata, np.uint8)[: len(raw)] = np.frombuffer(
                 raw, np.uint8
             )
-            self.header[:] = [self.header[0] + 1, len(raw), *frame.shape[:2]]
+            has_evidence = pupil_evidence is not None
+            if has_evidence:
+                np.frombuffer(self.evidence, np.uint8)[:pupil_evidence.size] = pupil_evidence.reshape(-1)
+            self.header[:] = [self.header[0] + 1, len(raw), *frame.shape[:2], int(has_evidence)]
         finally:
             self.lock.release()
         return True
@@ -147,7 +158,7 @@ class PreviewMailbox:
         if not self.lock.acquire(False):
             return None
         try:
-            revision, length, h, w = self.header[:]
+            revision, length, h, w, has_evidence = self.header[:]
             if revision <= self.last_read:
                 return None
             raw = bytes(self.metadata[:length])
@@ -156,10 +167,14 @@ class PreviewMailbox:
                 .reshape(h, w, 3)
                 .copy()
             )
+            payload = json.loads(raw)
+            x, y, rw, rh = map(int, payload["result"]["roi"])
+            payload["pupil_evidence"] = (np.frombuffer(self.evidence, np.uint8)[:rw * rh]
+                                         .reshape(rh, rw).copy() if has_evidence else None)
             self.last_read = revision
         finally:
             self.lock.release()
-        payload = json.loads(raw)
+        payload["tracking"] = TrackingConfig.model_validate(payload["tracking"])
         x, y, rw, rh = map(int, payload["result"]["roi"])
         payload.update(frame=frame, crop=frame[y : y + rh, x : x + rw], scale=1)
         return payload
@@ -218,31 +233,36 @@ def capture_worker(
     fid = index = 0
     due = time.perf_counter()
     first_size = None
+    encoded = False
     try:
         mode = source.mode
         if mode is not SourceMode.SIMULATION:
-            backend = {
-                CameraBackend.AUTO: cv2.CAP_ANY,
-                CameraBackend.DSHOW: cv2.CAP_DSHOW,
-                CameraBackend.MSMF: cv2.CAP_MSMF,
-                CameraBackend.V4L2: cv2.CAP_V4L2,
-            }[source.backend]
+            camera_settings = source.model_dump(mode="json")
+            backend = backend_for(camera_settings)
             if mode is SourceMode.VIDEO:
                 reader = VideoReader(source.path, stop)
                 cap = reader.cap
             else:
-                if backend == cv2.CAP_ANY and os.name == "nt":
-                    backend = cv2.CAP_DSHOW
-                cap = cv2.VideoCapture(int(source.camera), backend)
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*source.fourcc))
+                cap = cv2.VideoCapture(camera_target(camera_settings), backend)
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, source.width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, source.height)
+                # Changing dimensions can renegotiate the camera format.
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*source.fourcc))
                 cap.set(cv2.CAP_PROP_FPS, source.fps)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if not cap.isOpened():
                 raise RuntimeError(
                     "Cannot open source. Check camera index/backend or video path."
                 )
+            if mode is SourceMode.CAMERA:
+                try:
+                    report(events, "source", camera_controls=apply_controls(cap, camera_settings))
+                except Exception as exc:
+                    report(events, "source", camera_controls=f"Camera control request failed: {exc}")
+                if (backend == cv2.CAP_V4L2 and config.value.recording.codec is RecordingCodec.MJPG
+                    and config.value.recording.camera_mjpeg_passthrough
+                    and source.fourcc in ("MJPG", "JPEG") and shutil.which("ffmpeg")):
+                    encoded = bool(cap.set(cv2.CAP_PROP_CONVERT_RGB, 0))
             reported_fps = cap.get(cv2.CAP_PROP_FPS)
             fps = (
                 reported_fps
@@ -335,12 +355,36 @@ def capture_worker(
             else:
                 ok, frame = cap.read()
             acquired = time.time_ns()  # Host read-return time, NOT sensor exposure.
+            if ok and mode is SourceMode.CAMERA and encoded:
+                flat = frame.reshape(-1)
+                jpeg = (frame.dtype == np.uint8 and flat.size >= 4
+                        and tuple(flat[:2]) == (255, 216))
+                if jpeg and tuple(flat[-2:]) != (255, 217):
+                    end = flat.tobytes().rfind(b"\xff\xd9")
+                    jpeg = end >= 2
+                    flat = flat[:end + 2]
+                if first_size is None:
+                    probe = cv2.imdecode(flat, cv2.IMREAD_COLOR) if jpeg and flat.size <= len(mailbox.pixels) else None
+                    if probe is None:
+                        encoded = False
+                        cap.set(cv2.CAP_PROP_CONVERT_RGB, 1)
+                        ok, frame = cap.read()
+                        acquired = time.time_ns()
+                        report(events, "source", recording_path="Decoded full-resolution frames")
+                    else:
+                        first_size = probe.shape
+                        report(events, "dimensions", width=probe.shape[1], height=probe.shape[0])
+                        report(events, "source", recording_path="Original camera MJPEG; no re-encoding")
+                elif not jpeg:
+                    raise RuntimeError("Camera stopped returning complete JPEG packets.")
+                if encoded:
+                    frame = flat
             if not ok:
                 if mode is SourceMode.CAMERA:
                     raise RuntimeError("Camera read failed or camera disconnected.")
                 report(events, "eof")
                 break
-            if frame.ndim == 2:
+            if not encoded and frame.ndim == 2:
                 frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
             frame = np.ascontiguousarray(frame)
             if frame.size > len(mailbox.pixels):
@@ -352,7 +396,7 @@ def capture_worker(
                 report(
                     events, "dimensions", width=frame.shape[1], height=frame.shape[0]
                 )
-            elif frame.shape != first_size:
+            elif not encoded and frame.shape != first_size:
                 raise RuntimeError("Source dimensions changed during the session.")
             media = -1
             if mode is SourceMode.VIDEO:
@@ -427,6 +471,7 @@ def tracking_worker(
     frame_id = seq = 0
     revision = 0
     last_preview = 0
+    display_suspended = config.value.display.suspended
     current = None
     last_media = -1
     try:
@@ -444,10 +489,13 @@ def tracking_worker(
                     cmd = commands.get_nowait()
                     revision = cmd.get("revision", revision)
                     kind = cmd["command"]
-                    if kind == "config":
+                    if kind == "display":
+                        display_suspended = bool(cmd["suspended"])
+                    elif kind == "config":
                         previous_mode = core.config.tracking_mode
+                        previous_method = core.config.pupil_method
                         core.config = cmd["tracking"].model_copy(deep=True)
-                        if previous_mode != core.config.tracking_mode:
+                        if previous_mode != core.config.tracking_mode or previous_method != core.config.pupil_method:
                             core.clear_feature_history()
                     elif kind == "roi":
                         core.roi = list(cmd["roi"])
@@ -483,6 +531,10 @@ def tracking_worker(
                     continue
             if fresh is not None:
                 current, meta = fresh
+                if current.ndim == 1:
+                    current = cv2.imdecode(current, cv2.IMREAD_COLOR)
+                    if current is None:
+                        raise RuntimeError("Cannot decode the camera JPEG frame for tracking.")
                 fid, acquired, media, source_index, navigation_id = meta
                 if (
                     media >= 0
@@ -549,7 +601,7 @@ def tracking_worker(
                     stats["send_errors"].value += 1
                 if samples is not None:
                     try:
-                        samples.put_nowait(payload)
+                        samples.put_nowait((payload, core.config.pupil_method.value))
                     except queue.Full:
                         if not stats["log_fault"].value:
                             report(
@@ -562,24 +614,25 @@ def tracking_worker(
                 stats["processing_us"].value = (end - start) / 1000
             now = time.perf_counter()
             if (
-                changed
+                not display_suspended
+                and (changed
                 or (fresh is not None and config.value.source.mode is SourceMode.VIDEO)
-                or now - last_preview >= 1 / config.value.display.hz
+                or now - last_preview >= 1 / config.value.display.hz)
             ):
                 payload = dict(
                     result=result,
-                    tracking=core.config.model_copy(deep=True),
+                    tracking=core.config.model_dump(mode="json"),
                     frame_id=frame_id,
                     media_ns=media,
                     processing_ms=(end - start) / 1e6,
                     revision=revision,
                 )
                 payload.update(source_index=source_index, navigation_id=navigation_id)
-                published = preview.put(current, payload)
+                published = preview.put(current, payload, core.pupil_evidence)
                 if config.value.source.mode is SourceMode.VIDEO:
                     while not published and not stop.is_set():
                         stop.wait(0.001)
-                        published = preview.put(current, payload)
+                        published = preview.put(current, payload, core.pupil_evidence)
                 if published:
                     last_preview = now
             if fresh is not None:
@@ -668,30 +721,32 @@ def writer_worker(
                     sw.writerow(tracking_row(samples.get_nowait()))
                 except queue.Empty:
                     break
-            item = ring.get(timeout=0.01)
+            item = ring.get(timeout=0.01, copy=False)
             if item is not None:
                 frame, (fid, acquired, media) = item
-                if writer is None:
-                    shape = frame.shape[:2]
-                    fps = stats["source_fps"].value or config.value.source.fps
-                    filename = (
-                        "video.avi"
-                        if config.value.recording.codec is RecordingCodec.MJPG
-                        else "video.mkv"
-                    )
-                    writer = cv2.VideoWriter(
-                        str(folder / filename),
-                        cv2.VideoWriter_fourcc(*config.value.recording.codec),
-                        fps,
-                        (shape[1], shape[0]),
-                    )
-                    if not writer.isOpened():
-                        raise RuntimeError(
-                            "Video encoder could not open. Try MJPG or another recording directory."
+                try:
+                    if writer is None:
+                        fps = stats["source_fps"].value or config.value.source.fps
+                        filename = (
+                            "video.avi" if config.value.recording.codec is RecordingCodec.MJPG
+                            else "video.mkv"
                         )
-                if test_delay:
-                    time.sleep(test_delay)
-                writer.write(frame)
+                        if frame.ndim == 1:
+                            writer = MjpegCopyWriter(folder / filename, fps)
+                        else:
+                            shape = frame.shape[:2]
+                            writer = cv2.VideoWriter(
+                                str(folder / filename),
+                                cv2.VideoWriter_fourcc(*config.value.recording.codec),
+                                fps, (shape[1], shape[0]),
+                            )
+                            if not writer.isOpened():
+                                raise RuntimeError("Video encoder could not open. Try MJPG or another recording directory.")
+                    if test_delay:
+                        time.sleep(test_delay)
+                    writer.write(frame)
+                finally:
+                    ring.release()
                 fw.writerow([video_index, fid, acquired, media])
                 video_index += 1
                 stats["written"].value = video_index
@@ -706,7 +761,7 @@ def writer_worker(
                 # tracking_done is set only after its sample-queue feeder flushed.
                 while True:
                     try:
-                        sw.writerow(samples.get_nowait())
+                        sw.writerow(tracking_row(samples.get_nowait()))
                     except queue.Empty:
                         break
                 break
@@ -726,7 +781,12 @@ def writer_worker(
                 pass
     finally:
         if writer is not None:
-            writer.release()
+            try:
+                writer.release()
+            except Exception as exc:
+                error = str(exc)
+                stats["record_fault"].value = 2
+                report(events, "record_error", message=error)
             # OpenCV write() has no per-frame success return. Verify the finalized
             # container is readable and reports the expected frame count.
             check = cv2.VideoCapture(str(folder / filename))

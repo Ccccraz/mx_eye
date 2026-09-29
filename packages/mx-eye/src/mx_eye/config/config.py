@@ -42,6 +42,21 @@ class RecordingCodec(StrEnum):
     FFV1 = "FFV1"
 
 
+class PupilMethod(StrEnum):
+    THRESHOLD = "threshold"
+    STARBURST = "starburst"
+    EDGE_ELLIPSE = "edge_ellipse"
+    ADAPTIVE = "adaptive"
+
+
+PUPIL_METHODS = {
+    PupilMethod.THRESHOLD: "Threshold (original)",
+    PupilMethod.STARBURST: "Starburst-style",
+    PupilMethod.EDGE_ELLIPSE: "Edge + ellipse",
+    PupilMethod.ADAPTIVE: "Adaptive threshold",
+}
+
+
 class ConfigModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid", allow_inf_nan=False, validate_assignment=True
@@ -51,6 +66,11 @@ class ConfigModel(BaseModel):
 class SourceConfig(ConfigModel):
     mode: SourceMode = SourceMode.CAMERA
     camera: int = Field(default=0, ge=0)
+    camera_name: str = ""
+    device: str = ""
+    exposure_mode: Literal["unchanged", "manual", "auto"] = "unchanged"
+    exposure_ms: float = Field(default=7.8125, ge=0.01, le=1000)
+    gain: int | None = Field(default=None, ge=0, le=65535)
     path: str = ""
     width: int = Field(default=640, ge=32, le=16384)
     height: int = Field(default=480, ge=32, le=16384)
@@ -61,6 +81,13 @@ class SourceConfig(ConfigModel):
 
 
 class TrackingParameters(ConfigModel):
+    pupil_method: PupilMethod = PupilMethod.THRESHOLD
+    pupil_rays: int = Field(default=48, ge=16, le=128)
+    pupil_edge_contrast: int = Field(default=8, ge=1, le=100)
+    pupil_edge_threshold: int = Field(default=30, ge=1, le=255)
+    pupil_fit_error: float = Field(default=2.5, ge=0.5, le=10)
+    pupil_adaptive_window: int = Field(default=61, ge=3, le=301)
+    pupil_adaptive_offset: int = Field(default=7, ge=0, le=50)
     pupil_thr: int = Field(default=48, ge=0, le=255)
     pupil_min: int = Field(default=30, ge=0)
     pupil_max: int = Field(default=3000, ge=0)
@@ -116,6 +143,7 @@ class RecordingConfig(ConfigModel):
     buffer_mb: int = Field(default=128, ge=8, le=2048)
     codec: RecordingCodec = RecordingCodec.MJPG
     record_simulation: bool = False
+    camera_mjpeg_passthrough: bool = True
 
 
 class DisplayConfig(ConfigModel):
@@ -126,6 +154,8 @@ class DisplayConfig(ConfigModel):
     cr_mask: bool | None = None
     template_circle: bool | None = None
     template_inset: bool | None = None
+    rejection_reason: bool = True
+    suspended: bool = False
 
 
 class TemplateConfig(ConfigModel):
@@ -171,6 +201,15 @@ class MxEyeConfigStore:
     def load(cls, path: Path) -> Self:
         path = cls._check_path(path)
         raw: object = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and raw.get("format") == "mx-eye" and raw.get("version") == 1:
+            # Import settings from the original desktop app. The removed clock
+            # sync endpoint has no equivalent in the new protocol.
+            raw = dict(raw)
+            raw["version"] = "1.0.0"
+            network = raw.get("network")
+            if isinstance(network, dict):
+                raw["network"] = {key: value for key, value in network.items()
+                                  if key != "sync_port"}
         return cls(MxEyeConfigModel.model_validate(raw))
 
     def save(self, path: Path) -> None:
