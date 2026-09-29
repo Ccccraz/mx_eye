@@ -21,15 +21,14 @@ TRACKING_COLUMNS = {
     "pupil_area": "pupil_area",
     "template_ncc": "template_ncc",
     "flags": "flags",
-    "pupil_method": "pupil_method",
 }
 
 
-def tracking_row(sample: tuple[TrackingPayload, str]) -> tuple[int | float | str, ...]:
-    payload, method = sample
-    return tuple(method if attribute == "pupil_method" else
-                 int(payload.flags) if attribute == "flags" else getattr(payload, attribute)
-                 for attribute in TRACKING_COLUMNS.values())
+def tracking_row(payload: TrackingPayload) -> tuple[int | float, ...]:
+    return tuple(
+        int(payload.flags) if attribute == "flags" else getattr(payload, attribute)
+        for attribute in TRACKING_COLUMNS.values()
+    )
 
 
 """Mux already-compressed camera JPEGs; no video decode or encoder in this path."""

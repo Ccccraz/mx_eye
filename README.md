@@ -39,8 +39,8 @@ modes and exposure controls; ACQ reports the rate actually delivered.
 
 The **Pupil method** selector offers the original threshold detector,
 Starburst-style radial edges, edge/ellipse fitting, and adaptive thresholding.
-The current method is saved with every row of `tracking.csv`; it does not change
-the SDK's wire format. **Reason** shows the latest rejected pupil/CR sample on
+The method selected at session start is saved in `config.json`; `tracking.csv`
+retains its established 17-column format. **Reason** shows the latest rejected pupil/CR sample on
 the right side of the rate bar. **Pause displays** reduces preview/plot work
 while acquisition, tracking, network output and recording continue. Settings
 can import the previous desktop app's version 1 JSON configuration; the old
