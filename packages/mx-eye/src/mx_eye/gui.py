@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore as C
+from PySide6 import QtGui as G
 from PySide6 import QtWidgets as W
 
 from . import config as cfg
@@ -250,21 +251,24 @@ class Window(W.QMainWindow):
         self.source_label.setTextInteractionFlags(C.Qt.TextSelectableByMouse)
         self.source_label.setWordWrap(True)
         layout.addWidget(self.source_label)
-        self.metrics = label(
-            "ACQUISITION  —       TRACKING  —       PROCESSING  —       RECORDING  —",
-            "metric",
+        metrics_bar = W.QFrame()
+        metrics_bar.setObjectName("metricsBar")
+        metrics_bar.setStyleSheet(
+            "QFrame#metricsBar { background:#192331; border-radius:6px; }"
         )
-        self.metrics.setWordWrap(True)
-        metrics_row = W.QHBoxLayout()
+        metrics_row = W.QHBoxLayout(metrics_bar)
+        metrics_row.setContentsMargins(13, 8, 13, 8)
+        metrics_row.setSpacing(12)
+        self.metrics = label("ACQ —  TRACK —  PROC —  SKIPPED —  VIDEO —", "muted")
+        self.metrics.setFont(G.QFontDatabase.systemFont(G.QFontDatabase.FixedFont))
+        self.metrics.setFixedWidth(self.metrics.fontMetrics().horizontalAdvance(
+            "ACQ 999.9 fps  TRACK 999.9 fps  PROC 999.99 ms  SKIPPED 999999  VIDEO 999999 frames · buffer 9999"
+        ))
+        self.metrics.setToolTip("Acquisition, tracking and recording status")
         metrics_row.addWidget(self.metrics)
-        self.show_reason = W.QCheckBox("Reason")
-        self.show_reason.setChecked(config.value.display.rejection_reason)
-        self.show_reason.toggled.connect(self.update_alert)
-        metrics_row.addWidget(self.show_reason)
         self.reason_label = label("", "metricAlert")
-        self.reason_label.setMinimumWidth(150)
         metrics_row.addWidget(self.reason_label, 1)
-        layout.addLayout(metrics_row)
+        layout.addWidget(metrics_bar)
         split = W.QSplitter(C.Qt.Horizontal)
         layout.addWidget(split, 1)
         main = W.QWidget()
@@ -575,7 +579,7 @@ class Window(W.QMainWindow):
     def update_alert(self, *args):
         now = time.monotonic()
         error = self._error_text if now < self._error_until else ""
-        reason = self._reason_text if self.show_reason.isChecked() and now < self._reason_until else ""
+        reason = self._reason_text if now < self._reason_until else ""
         message = error or (f"No valid position: {reason}" if reason else "")
         self.reason_label.setToolTip(message)
         self.reason_label.setText(self.reason_label.fontMetrics().elidedText(
@@ -727,7 +731,6 @@ class Window(W.QMainWindow):
             config.value.display.crosshairs = self.crosshairs.isChecked()
             config.value.display.template_circle = self.circle.isChecked()
             config.value.display.template_inset = self.inset.isChecked()
-            config.value.display.rejection_reason = self.show_reason.isChecked()
             config.value.display.suspended = self.display_pause.isChecked()
             config.value.source.mode = self.source_mode()
             config.value.source.path = self.saved_source_path
@@ -827,7 +830,6 @@ class Window(W.QMainWindow):
             self.source_label.setText(self.saved_source_path)
             self.mode.setCurrentText(config.value.tracking.tracking_mode.value)
             self.pupil_method.setCurrentIndex(max(0, self.pupil_method.findData(config.value.tracking.pupil_method.value)))
-            self.show_reason.setChecked(config.value.display.rejection_reason)
             self.display_pause.setChecked(config.value.display.suspended)
             self.coordinates.setCurrentIndex(
                 max(
@@ -977,9 +979,15 @@ class Window(W.QMainWindow):
             self._error_until = float("inf")
         elif self._error_until == float("inf"):
             self._error_until = now + 0.25
-        self.metrics.setText(
-            f"ACQ  {self.rates[0]:.1f} fps     TRACK  {self.rates[1]:.1f} fps     PROC  {stats.processing_us / 1000:.2f} ms     SKIPPED  {int(stats.tracking_skips)}     VIDEO  {recording}"
+        metrics_text = (
+            f"ACQ {self.rates[0]:5.1f} fps  TRACK {self.rates[1]:5.1f} fps  "
+            f"PROC {stats.processing_us / 1000:6.2f} ms  "
+            f"SKIPPED {int(stats.tracking_skips):6d}  VIDEO {recording}"
         )
+        self.metrics.setToolTip(metrics_text)
+        self.metrics.setText(self.metrics.fontMetrics().elidedText(
+            metrics_text, C.Qt.ElideRight, self.metrics.width() - 2
+        ))
         self.update_alert()
         self.timeline.setMaximum(max(1, state.source.total - 1))
         if self.display_pause.isChecked():
