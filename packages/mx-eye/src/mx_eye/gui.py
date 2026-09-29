@@ -13,7 +13,7 @@ from PySide6 import QtGui as G
 from PySide6 import QtWidgets as W
 
 from . import config as cfg
-from .cameras import CameraControls
+from .cameras import CameraControls, CameraNameDiscovery
 from .config import (
     PUPIL_METHODS,
     PupilMethod,
@@ -209,6 +209,7 @@ class Window(W.QMainWindow):
         toolbar.addWidget(label("mx_eye", "brand"))
         toolbar.addWidget(label("MXBI  /  PUPIL + CR", "muted"))
         toolbar.addStretch()
+        toolbar.addWidget(label("Source:"))
         self.source = W.QComboBox()
         for caption, mode in [
             ("Camera", SourceMode.CAMERA),
@@ -219,6 +220,7 @@ class Window(W.QMainWindow):
         self.source.setCurrentIndex(
             max(0, self.source.findData(config.value.source.mode.value))
         )
+        self.source.setFixedWidth(max(120, self.source.sizeHint().width()))
         toolbar.addWidget(self.source)
         self.open_button = W.QPushButton("Open video…")
         self.open_button.clicked.connect(self.open_video)
@@ -230,6 +232,11 @@ class Window(W.QMainWindow):
         self.record_button = W.QPushButton("● Record")
         self.record_button.clicked.connect(self.toggle_recording)
         toolbar.addWidget(self.record_button)
+        action_width = max(140, max(self.start_button.fontMetrics().horizontalAdvance(text)
+                                   for text in ("Start", "Stop", "Open video…")) + 36)
+        self.start_button.setFixedWidth(action_width)
+        self.open_button.setFixedWidth(action_width)
+        self.record_button.setFixedWidth(max(150, self.record_button.fontMetrics().horizontalAdvance("■ Stop recording") + 36))
         layout.addLayout(toolbar)
         files = W.QHBoxLayout()
         files.addStretch()
@@ -570,7 +577,17 @@ class Window(W.QMainWindow):
         self.update_method_controls()
         self.display_changed(self.display_pause.isChecked())
         add_tooltips(self)
+        self.camera_names = {}
+        self.camera_name_discovery = CameraNameDiscovery(self)
+        self.camera_name_discovery.finished.connect(self.camera_names_received)
+        C.QTimer.singleShot(0, self.camera_name_discovery.start)
         W.QApplication.instance().installEventFilter(self)
+
+    def camera_names_received(self, names):
+        self.camera_names = names
+        selected = self.camera.value()
+        if selected in names and not self.service.run:
+            self.service.config.value.source.camera_name = names[selected]
 
     def source_mode(self):
         return SourceMode(self.source.currentData())
@@ -656,6 +673,7 @@ class Window(W.QMainWindow):
         config.value.source.mode = self.source_mode()
         config.value.source.path = self.saved_source_path
         config.value.source.camera = self.camera.value()
+        config.value.source.camera_name = self.camera_names.get(self.camera.value(), config.value.source.camera_name)
         config.value.source.speed = self.speed.value()
         for key, param in self.parameters.items():
             setattr(config.value.tracking, key, param.spin.value())
@@ -980,7 +998,7 @@ class Window(W.QMainWindow):
         source = self.service.config.value.source
         name = (Path(self.saved_source_path).name if mode is SourceMode.VIDEO
                 else "Simulation" if mode is SourceMode.SIMULATION
-                else source.camera_name or source.device or f"Camera {self.camera.value()}")
+                else self.camera_names.get(self.camera.value()) or source.camera_name or source.device or f"Camera {self.camera.value()}")
         self.source_label.setText(self.source_label.fontMetrics().elidedText(
             name, C.Qt.ElideMiddle, max(0, self.source_label.width())))
         self.source_label.setToolTip(self.saved_source_path if mode is SourceMode.VIDEO else name)
@@ -1200,6 +1218,7 @@ class Window(W.QMainWindow):
             event.ignore()
             C.QTimer.singleShot(100, self.close)
             return
+        self.camera_name_discovery.stop()
         self.timer.stop()
         self.service.close()
         event.accept()

@@ -15,6 +15,72 @@ def discover_cameras(output):
         output.put(([], str(exc)))
 
 
+def discover_camera_names(output):
+    """Read device names without opening cameras or enumerating capture modes."""
+    try:
+        if sys.platform == "win32":
+            from pygrabber.dshow_graph import FilterGraph
+            names = dict(enumerate(FilterGraph().get_input_devices()))
+        elif sys.platform.startswith("linux"):
+            from pathlib import Path
+            names = {
+                int(path.parent.name[5:]): path.read_text().strip()
+                for path in Path("/sys/class/video4linux").glob("video[0-9]*/name")
+            }
+        else:
+            names = {}
+        output.put(names)
+    except Exception:
+        output.put({})  # Keep saved names / index fallback if discovery is unavailable.
+
+
+class CameraNameDiscovery(C.QObject):
+    finished = C.Signal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.process = self.output = None
+        self.timer = C.QTimer(self)
+        self.timer.timeout.connect(self.poll)
+
+    def start(self):
+        self.stop()
+        context = mp.get_context("spawn")
+        self.output = context.Queue()
+        self.process = context.Process(target=discover_camera_names,
+                                       args=(self.output,), daemon=True)
+        try:
+            self.process.start()
+        except (OSError, RuntimeError):
+            self.stop()
+            self.finished.emit({})
+            return
+        self.started = time.monotonic()
+        self.timer.start(100)
+
+    def poll(self):
+        try:
+            names = self.output.get_nowait()
+        except queue.Empty:
+            if time.monotonic() - self.started < 10 and self.process.is_alive():
+                return
+            names = {}
+        self.stop()
+        self.finished.emit(names)
+
+    def stop(self):
+        self.timer.stop()
+        if self.process is not None:
+            if self.process.pid is not None:
+                if self.process.is_alive():
+                    self.process.terminate()
+                self.process.join(timeout=.5)
+            self.process = None
+        if self.output is not None:
+            self.output.close()
+            self.output = None
+
+
 class CameraControls(W.QWidget):
     def __init__(self,source,parent=None):
         super().__init__(parent)
