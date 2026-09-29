@@ -69,6 +69,8 @@ class Service:
         self._template_image = None
         self.directory = ""
         self.source_info = {}
+        self.camera_control_info = ""
+        self.recording_path_info = ""
         self.priority_info = []
         self._server_errors = []
         self._server = None
@@ -237,6 +239,8 @@ class Service:
         self.revision = 0
         self.priority_info = []
         self.source_info = {}
+        self.camera_control_info = ""
+        self.recording_path_info = ""
         self._preview = None
         self.directory = ""
         self.state, self.message = "starting", "Opening source…"
@@ -365,7 +369,12 @@ class Service:
                 elif kind == "template":
                     self.config.value.template = e["template"]
                 elif kind in ("source", "dimensions"):
-                    self.source_info.update({k: v for k, v in e.items() if k != "kind"})
+                    self.source_info.update({k: v for k, v in e.items()
+                                             if k in SourceStatus.model_fields})
+                    if "camera_controls" in e:
+                        self.camera_control_info = e["camera_controls"]
+                    if "recording_path" in e:
+                        self.recording_path_info = e["recording_path"]
                 elif kind.endswith("_ready"):
                     self.run["ready"].add(kind)
         except queue.Empty:
@@ -491,6 +500,8 @@ class Service:
             self.config.value.template = args["template"]
         if command == "clear_template":
             self.config.value.template = None
+        if command == "display":
+            self.config.value.display.suspended = bool(args["suspended"])
         if not self.run:
             if command == "roi":
                 self.config.value.tracking.roi = tuple(args["roi"])

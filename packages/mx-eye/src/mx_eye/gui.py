@@ -14,6 +14,8 @@ from PySide6 import QtWidgets as W
 from . import config as cfg
 from .cameras import CameraControls
 from .config import (
+    PUPIL_METHODS,
+    PupilMethod,
     PupilCoordinates,
     RecordingCodec,
     SourceMode,
@@ -63,6 +65,7 @@ class Settings(W.QDialog):
                     ("buffer_mb", "Buffer size (MiB)", 8, 2048),
                     ("codec", "Codec", [item.value for item in RecordingCodec]),
                     ("record_simulation", "Record simulation", True),
+                    ("camera_mjpeg_passthrough", "Use original camera MJPEG when available", True),
                 ],
             ),
         }
@@ -175,6 +178,8 @@ class Window(W.QMainWindow):
         self._closing = False
         self.saved_source_path = config.value.source.path
         self.pending_video_path = None
+        self._reason_text = self._error_text = ""
+        self._reason_until = self._error_until = 0.0
         central = W.QWidget()
         self.setCentralWidget(central)
         layout = W.QVBoxLayout(central)
@@ -219,6 +224,12 @@ class Window(W.QMainWindow):
             button.clicked.connect(callback)
             files.addWidget(button)
         files.addStretch()
+        self.display_pause = W.QPushButton("Pause displays")
+        self.display_pause.setCheckable(True)
+        self.display_pause.setChecked(config.value.display.suspended)
+        self.display_pause.setToolTip("Freeze video previews and plots to leave CPU for tracking and recording. Status and Stop remain active.")
+        self.display_pause.toggled.connect(self.display_changed)
+        files.addWidget(self.display_pause)
         camera_button = W.QPushButton("Camera settings…")
         camera_button.clicked.connect(self.settings)
         self.camera_settings_button = camera_button
@@ -244,7 +255,16 @@ class Window(W.QMainWindow):
             "metric",
         )
         self.metrics.setWordWrap(True)
-        layout.addWidget(self.metrics)
+        metrics_row = W.QHBoxLayout()
+        metrics_row.addWidget(self.metrics)
+        self.show_reason = W.QCheckBox("Reason")
+        self.show_reason.setChecked(config.value.display.rejection_reason)
+        self.show_reason.toggled.connect(self.update_alert)
+        metrics_row.addWidget(self.show_reason)
+        self.reason_label = label("", "metricAlert")
+        self.reason_label.setMinimumWidth(150)
+        metrics_row.addWidget(self.reason_label, 1)
+        layout.addLayout(metrics_row)
         split = W.QSplitter(C.Qt.Horizontal)
         layout.addWidget(split, 1)
         main = W.QWidget()
@@ -403,6 +423,16 @@ class Window(W.QMainWindow):
         mode_row.addWidget(label("Tracking mode", "muted"))
         mode_row.addWidget(self.mode, 1)
         body.addLayout(mode_row)
+        method_row = W.QHBoxLayout()
+        method_row.addWidget(label("Pupil method", "muted"))
+        self.pupil_method = W.QComboBox()
+        for method, title in PUPIL_METHODS.items():
+            self.pupil_method.addItem(title, method.value)
+        self.pupil_method.setCurrentIndex(max(0, self.pupil_method.findData(config.value.tracking.pupil_method.value)))
+        self.pupil_method.currentIndexChanged.connect(self.update_method_controls)
+        self.pupil_method.currentIndexChanged.connect(self.schedule_parameters)
+        method_row.addWidget(self.pupil_method, 1)
+        body.addLayout(method_row)
         self.track_label = label("Waiting for source", "muted")
         self.track_label.setWordWrap(True)
         body.addWidget(self.track_label)
@@ -415,6 +445,18 @@ class Window(W.QMainWindow):
                     ("pupil_min", "Minimum area", 1, 3000, 1),
                     ("pupil_max", "Maximum area", 10, 15000, 10),
                 ],
+            ),
+            (
+                "Pupil edge methods", False,
+                [("pupil_rays", "Radial rays", 16, 128, 1),
+                 ("pupil_edge_contrast", "Edge contrast", 1, 100, 1),
+                 ("pupil_edge_threshold", "Canny threshold", 1, 255, 1),
+                 ("pupil_fit_error", "Ellipse tolerance", 0.5, 10, 0.1)],
+            ),
+            (
+                "Adaptive pupil", False,
+                [("pupil_adaptive_window", "Window", 3, 301, 2),
+                 ("pupil_adaptive_offset", "Offset", 0, 50, 1)],
             ),
             (
                 "Corneal reflection",
@@ -449,6 +491,10 @@ class Window(W.QMainWindow):
         for title, opened, rows in groups:
             section = Section(title, opened)
             body.addWidget(section)
+            if title == "Pupil edge methods":
+                self.edge_section = section
+            elif title == "Adaptive pupil":
+                self.adaptive_section = section
             for key, text, lo, hi, step in rows:
                 param = Parameter(
                     text, getattr(config.value.tracking, key), lo, hi, step
@@ -495,6 +541,8 @@ class Window(W.QMainWindow):
         self.timer = C.QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(40)
+        self.update_method_controls()
+        self.display_changed(self.display_pause.isChecked())
         add_tooltips(self)
         W.QApplication.instance().installEventFilter(self)
 
@@ -510,6 +558,40 @@ class Window(W.QMainWindow):
     def call(self, command, callback=None, **args):
         self.pending.append((self.service.submit(command, **args), callback))
 
+    def update_method_controls(self, *args):
+        method = PupilMethod(self.pupil_method.currentData())
+        self.edge_section.setVisible(method in (PupilMethod.STARBURST, PupilMethod.EDGE_ELLIPSE))
+        self.adaptive_section.setVisible(method is PupilMethod.ADAPTIVE)
+        for key in ("pupil_rays", "pupil_edge_contrast", "pupil_edge_threshold", "pupil_fit_error",
+                    "pupil_adaptive_window", "pupil_adaptive_offset"):
+            relevant = ((key == "pupil_rays" and method is PupilMethod.STARBURST)
+                        or (key in ("pupil_edge_contrast", "pupil_fit_error")
+                            and method in (PupilMethod.STARBURST, PupilMethod.EDGE_ELLIPSE))
+                        or (key == "pupil_edge_threshold" and method is PupilMethod.EDGE_ELLIPSE)
+                        or (key.startswith("pupil_adaptive") and method is PupilMethod.ADAPTIVE))
+            self.parameters[key].setEnabled(relevant)
+        self.parameters["pupil_thr"].setEnabled(method is PupilMethod.THRESHOLD)
+
+    def update_alert(self, *args):
+        now = time.monotonic()
+        error = self._error_text if now < self._error_until else ""
+        reason = self._reason_text if self.show_reason.isChecked() and now < self._reason_until else ""
+        message = error or (f"No valid position: {reason}" if reason else "")
+        self.reason_label.setToolTip(message)
+        self.reason_label.setText(self.reason_label.fontMetrics().elidedText(
+            message, C.Qt.ElideRight, max(0, self.reason_label.width() - 8)))
+        self.reason_label.setStyleSheet("color:#ff817f;" if error else "color:#f0ad74;")
+
+    def display_changed(self, suspended):
+        self.display_pause.setText("Resume displays" if suspended else "Pause displays")
+        self.timer.setInterval(200 if suspended else 40)
+        self.full.setEnabled(not suspended)
+        self.eye.setEnabled(not suspended)
+        if self.service.run:
+            self.call("display", suspended=suspended)
+        else:
+            self.service.config.value.display.suspended = suspended
+
     def schedule_parameters(self, *args):
         if hasattr(self, "param_timer"):
             self.param_timer.start(80)
@@ -519,6 +601,7 @@ class Window(W.QMainWindow):
         for key, param in self.parameters.items():
             setattr(tracking, key, param.spin.value())
         tracking.tracking_mode = self.tracking_mode()
+        tracking.pupil_method = PupilMethod(self.pupil_method.currentData())
         tracking.pupil_coordinates = self.pupil_coordinates()
         tracking.template_tracking = self.template_on.isChecked()
         self.call("config", tracking=tracking)
@@ -551,6 +634,7 @@ class Window(W.QMainWindow):
         for key, param in self.parameters.items():
             setattr(config.value.tracking, key, param.spin.value())
         config.value.tracking.tracking_mode = self.tracking_mode()
+        config.value.tracking.pupil_method = PupilMethod(self.pupil_method.currentData())
         config.value.tracking.pupil_coordinates = self.pupil_coordinates()
         config.value.tracking.template_tracking = self.template_on.isChecked()
         self.call("settings", config=config, callback=lambda: self.call("start"))
@@ -643,6 +727,8 @@ class Window(W.QMainWindow):
             config.value.display.crosshairs = self.crosshairs.isChecked()
             config.value.display.template_circle = self.circle.isChecked()
             config.value.display.template_inset = self.inset.isChecked()
+            config.value.display.rejection_reason = self.show_reason.isChecked()
+            config.value.display.suspended = self.display_pause.isChecked()
             config.value.source.mode = self.source_mode()
             config.value.source.path = self.saved_source_path
             config.value.source.camera = self.camera.value()
@@ -650,6 +736,7 @@ class Window(W.QMainWindow):
             for key, param in self.parameters.items():
                 setattr(config.value.tracking, key, param.spin.value())
             config.value.tracking.tracking_mode = self.tracking_mode()
+            config.value.tracking.pupil_method = PupilMethod(self.pupil_method.currentData())
             config.value.tracking.pupil_coordinates = self.pupil_coordinates()
             config.value.tracking.template_tracking = self.template_on.isChecked()
             try:
@@ -739,6 +826,9 @@ class Window(W.QMainWindow):
             self.saved_source_path = config.value.source.path
             self.source_label.setText(self.saved_source_path)
             self.mode.setCurrentText(config.value.tracking.tracking_mode.value)
+            self.pupil_method.setCurrentIndex(max(0, self.pupil_method.findData(config.value.tracking.pupil_method.value)))
+            self.show_reason.setChecked(config.value.display.rejection_reason)
+            self.display_pause.setChecked(config.value.display.suspended)
             self.coordinates.setCurrentIndex(
                 max(
                     0,
@@ -812,6 +902,8 @@ class Window(W.QMainWindow):
                 camera_mode += f" · driver {info.driver_fps:g} fps"
             self.source_label.setText(
                 f"{name} · {camera_mode} · full video is recorded"
+                + (f" · {self.service.recording_path_info}" if self.service.recording_path_info else "")
+                + (f" · {self.service.camera_control_info}" if self.service.camera_control_info else "")
             )
         active = state.state in ("running", "starting", "stopping")
         for widget in (
@@ -879,13 +971,19 @@ class Window(W.QMainWindow):
         )
         if stats.log_fault:
             recording += " · LOG INCOMPLETE"
+        fault = bool(stats.capture_fault or stats.tracking_fault or stats.record_fault or stats.log_fault)
+        if fault:
+            self._error_text = state.message or "Acquisition, tracking, or recording error"
+            self._error_until = float("inf")
+        elif self._error_until == float("inf"):
+            self._error_until = now + 0.25
         self.metrics.setText(
             f"ACQ  {self.rates[0]:.1f} fps     TRACK  {self.rates[1]:.1f} fps     PROC  {stats.processing_us / 1000:.2f} ms     SKIPPED  {int(stats.tracking_skips)}     VIDEO  {recording}"
         )
-        self.metrics.setStyleSheet(
-            "color:#ff817f;" if stats.record_fault or stats.log_fault else ""
-        )
+        self.update_alert()
         self.timeline.setMaximum(max(1, state.source.total - 1))
+        if self.display_pause.isChecked():
+            return
         payload = self.service.preview()
         fresh_payload = payload is not None
         if payload:
@@ -916,8 +1014,17 @@ class Window(W.QMainWindow):
             cr_mask=self.cr_mask.isChecked(),
             params=payload["tracking"],
             crosshairs=self.crosshairs.isChecked(),
+            pupil_evidence=payload.get("pupil_evidence"),
         )
         self.track_label.setText(r["track_status"])
+        if fresh_payload:
+            reason = r.get("reject_reason", "")
+            if reason:
+                self._reason_text = reason
+                self._reason_until = float("inf") if active else now + 0.25
+            elif self._reason_until == float("inf"):
+                self._reason_until = now + 0.25
+            self.update_alert()
         self.template_label.setText(r["template_status"] or "No template selected")
         if video:
             source_index = payload["source_index"]
@@ -948,6 +1055,7 @@ class Window(W.QMainWindow):
             tracking.pupil_coordinates
             if tracking.tracking_mode is TrackingMode.PUPIL_ONLY
             else None,
+            tracking.pupil_method,
         )
         if signature != self.output_signature:
             self.output_signature = signature
@@ -974,6 +1082,9 @@ class Window(W.QMainWindow):
                 param.set_value(getattr(tracking, key))
             with C.QSignalBlocker(self.template_on):
                 self.template_on.setChecked(tracking.template_tracking)
+            with C.QSignalBlocker(self.pupil_method):
+                self.pupil_method.setCurrentIndex(self.pupil_method.findData(tracking.pupil_method.value))
+            self.update_method_controls()
         if payload["frame_id"] != self.last_history_frame:
             self.history.append((time.monotonic(), r["x"], r["y"]))
             self.last_history_frame = payload["frame_id"]

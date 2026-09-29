@@ -21,11 +21,55 @@ TRACKING_COLUMNS = {
     "pupil_area": "pupil_area",
     "template_ncc": "template_ncc",
     "flags": "flags",
+    "pupil_method": "pupil_method",
 }
 
 
-def tracking_row(payload: TrackingPayload) -> tuple[int | float, ...]:
-    return tuple(
-        int(payload.flags) if attribute == "flags" else getattr(payload, attribute)
-        for attribute in TRACKING_COLUMNS.values()
-    )
+def tracking_row(sample: tuple[TrackingPayload, str]) -> tuple[int | float | str, ...]:
+    payload, method = sample
+    return tuple(method if attribute == "pupil_method" else
+                 int(payload.flags) if attribute == "flags" else getattr(payload, attribute)
+                 for attribute in TRACKING_COLUMNS.values())
+
+
+"""Mux already-compressed camera JPEGs; no video decode or encoder in this path."""
+import subprocess
+
+
+class MjpegCopyWriter:
+    def __init__(self, path, fps):
+        self.log = path.with_suffix('.ffmpeg.log').open('wb')
+        try:
+            self.process = subprocess.Popen(
+                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
+                 '-f', 'mjpeg', '-framerate', str(fps), '-i', 'pipe:0',
+                 '-map', '0:v:0', '-c:v', 'copy', '-an', '-y', str(path)],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=self.log, bufsize=0)
+        except Exception:
+            self.log.close()
+            raise
+
+    def write(self, frame):
+        view = memoryview(frame).cast('B')
+        while view:
+            size = self.process.stdin.write(view)
+            if not size:
+                raise IOError('FFmpeg stopped accepting video packets; inspect video.ffmpeg.log.')
+            view = view[size:]
+
+    def release(self):
+        try:
+            try:
+                self.process.stdin.close()
+            except BrokenPipeError:
+                pass  # Still reap the failed process and report its exit code.
+            try:
+                code = self.process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+                raise IOError('FFmpeg did not finalize the video in time.')
+            if code:
+                raise IOError(f'FFmpeg failed ({code}); inspect video.ffmpeg.log.')
+        finally:
+            self.log.close()

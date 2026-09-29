@@ -259,6 +259,7 @@ class EyeView(W.QWidget):
         params=None,
         crosshairs=True,
         pupil_mask=None,
+        pupil_evidence=None,
         cr_mask=None,
         template=None,
         circle=True,
@@ -269,8 +270,10 @@ class EyeView(W.QWidget):
         cr_mask = masks if cr_mask is None else cr_mask
         if (pupil_mask or cr_mask) and params:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            evidence = (pupil_evidence != 0 if pupil_evidence is not None
+                        and pupil_evidence.shape == gray.shape else gray < params.pupil_thr)
             for mask, color in [
-                ((gray < params.pupil_thr) & pupil_mask, (245, 135, 65)),
+                (evidence & pupil_mask, (245, 135, 65)),
                 (
                     (gray > params.cr_thr)
                     & cr_mask
@@ -377,13 +380,14 @@ class EyeView(W.QWidget):
             painter.setPen(G.QPen(G.QColor("#f7d987"), 2, C.Qt.DashLine))
             painter.drawRect(C.QRectF(self._point((x, y)), self._point((x + w, y + h))))
         if self.crosshairs:
-            for key, color in [("pupil", "#67d5f0"), ("cr", "#ffab62")]:
+            for key, color in [("pupil", "#23518b"), ("cr", "#a42d38")]:
                 candidate = self.result.get(key)
                 if candidate:
                     p = self._point((candidate["x"], candidate["y"]))
-                    painter.setPen(G.QPen(G.QColor(color), 1.5))
-                    painter.drawLine(p + C.QPointF(-8, 0), p + C.QPointF(8, 0))
-                    painter.drawLine(p + C.QPointF(0, -8), p + C.QPointF(0, 8))
+                    for stroke, width in (("#e7edf3", 3.5), (color, 1.8)):
+                        painter.setPen(G.QPen(G.QColor(stroke), width))
+                        painter.drawLine(p + C.QPointF(-8, 0), p + C.QPointF(8, 0))
+                        painter.drawLine(p + C.QPointF(0, -8), p + C.QPointF(0, 8))
         if not self.crop and self.inset and self.template_image is not None:
             size = min(110, max(55, min(iw, ih) * 0.22))
             x = max(8, min(self.width() - size - 12, self.offset[0] + iw - size - 10))

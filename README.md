@@ -30,6 +30,22 @@ For a camera-free first check:
 uv run mx-eye --demo
 ```
 
+On Raspberry Pi OS/Debian, install `v4l-utils` for USB camera discovery and
+exposure/gain controls. Install `ffmpeg` to save a compatible V4L2 MJPEG camera's
+original compressed frames without re-encoding (`sudo apt install v4l-utils
+ffmpeg`). When that path is unavailable, the recording worker saves decoded
+full-resolution frames using the selected codec. Camera Settings shows driver
+modes and exposure controls; ACQ reports the rate actually delivered.
+
+The **Pupil method** selector offers the original threshold detector,
+Starburst-style radial edges, edge/ellipse fitting, and adaptive thresholding.
+The current method is saved with every row of `tracking.csv`; it does not change
+the SDK's wire format. **Reason** shows the latest rejected pupil/CR sample on
+the right side of the rate bar. **Pause displays** reduces preview/plot work
+while acquisition, tracking, network output and recording continue. Settings
+can import the previous desktop app's version 1 JSON configuration; the old
+`sync_port` setting is retired because clocks now synchronize through the OS.
+
 Click **Start** in the tracker, then **Connect** in the client: the SDK's
 data port exists only while a session is publishing, so connecting first reports
 a refused connection. The client's **Start tracker** and **Stop tracker**

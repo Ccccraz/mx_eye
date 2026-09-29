@@ -10,7 +10,12 @@
     "fps": 120.0,
     "backend": "auto",
     "fourcc": "MJPG",
-    "speed": 1.0
+    "speed": 1.0,
+    "camera_name": "",
+    "device": "",
+    "exposure_mode": "unchanged",
+    "exposure_ms": 7.8125,
+    "gain": null
   },
   "tracking": {
     "pupil_thr": 48,
@@ -35,7 +40,14 @@
       0.0,
       320.0,
       240.0
-    ]
+    ],
+    "pupil_method": "threshold",
+    "pupil_rays": 48,
+    "pupil_edge_contrast": 8,
+    "pupil_edge_threshold": 30,
+    "pupil_fit_error": 2.5,
+    "pupil_adaptive_window": 61,
+    "pupil_adaptive_offset": 7
   },
   "network": {
     "bind": "127.0.0.1",
@@ -48,12 +60,15 @@
     "directory": "recordings",
     "buffer_mb": 128,
     "codec": "MJPG",
-    "record_simulation": false
+    "record_simulation": false,
+    "camera_mjpeg_passthrough": true
   },
   "display": {
     "hz": 25.0,
     "masks": true,
-    "crosshairs": true
+    "crosshairs": true,
+    "rejection_reason": true,
+    "suspended": false
   },
   "template": null
 }
