@@ -65,15 +65,26 @@ class Settings(W.QDialog):
                     ("directory", "Output folder", None),
                     ("buffer_mb", "Buffer size (MiB)", 8, 2048),
                     ("codec", "Codec", [item.value for item in RecordingCodec]),
-                    ("record_simulation", "Record simulation", True),
                     ("camera_mjpeg_passthrough", "Use original camera MJPEG when available", True),
+                ],
+            ),
+            "View": (
+                "display",
+                [
+                    ("hz", "GUI refresh rate (Hz)", 1, 120),
+                    ("pupil_mask", "Pupil mask", True),
+                    ("cr_mask", "CR mask", True),
+                    ("crosshairs", "Pupil / CR crosshairs", True),
+                    ("template_circle", "Template size overlay", True),
+                    ("template_inset", "Template / xcorr inset", True),
                 ],
             ),
         }
         notes = {
-            "Camera": "FPS and format are requests to the driver. The status bar shows measured acquisition rate. Camera mode always records while running.",
+            "Camera": "FPS and format are requests to the driver. The status bar shows measured acquisition rate. Recording is controlled separately by the Record button.",
             "Network": "For another computer, bind to 0.0.0.0 and use this tracker’s IP in the SDK. UDP sends to one configured receiver. Control is unauthenticated: use only your trusted local network.",
             "Recording": "MJPG: fast, lossy AVI. FFV1: lossless MKV, higher CPU demand. Full source frames are saved without overlays. Buffer overflow stops recording and marks the session incomplete; tracking continues.",
+            "View": "Display refresh is independent of acquisition and tracking. Suspend displays to remove preview and plot work while tracking continues.",
         }
         for title, (group, rows) in specs.items():
             page = W.QWidget()
@@ -85,6 +96,8 @@ class Settings(W.QDialog):
             for key, text, *args in rows:
                 value = getattr(getattr(config.value, group), key)
                 if args[0] is True:
+                    if value is None:
+                        value = config.value.display.masks if key in ("pupil_mask", "cr_mask") else True
                     widget = W.QCheckBox()
                     widget.setChecked(value)
                 elif isinstance(args[0], list):
@@ -95,7 +108,7 @@ class Settings(W.QDialog):
                     widget = W.QLineEdit(str(value))
                 else:
                     widget = (
-                        W.QDoubleSpinBox() if key in ("fps", "speed") else W.QSpinBox()
+                        W.QDoubleSpinBox() if key in ("fps", "speed", "hz") else W.QSpinBox()
                     )
                     widget.setRange(args[0], args[1])
                     widget.setValue(value)
@@ -110,6 +123,10 @@ class Settings(W.QDialog):
             note.setWordWrap(True)
             form.addRow(note)
             tabs.addTab(page, title)
+            if parent is not None and parent.service.run and title != "View":
+                page.setEnabled(False)
+        if parent is not None and parent.service.run:
+            tabs.setCurrentIndex(tabs.count() - 1)
         buttons = W.QDialogButtonBox(
             W.QDialogButtonBox.Save | W.QDialogButtonBox.Cancel
         )
@@ -132,8 +149,11 @@ class Settings(W.QDialog):
             )
             return
         try:
-            self.config.value.source = self.camera_controls.values()
+            if self.parent() is None or not self.parent().service.run:
+                self.config.value.source = self.camera_controls.values()
             for (group, key), widget in self.fields.items():
+                if self.parent() is not None and self.parent().service.run and group != "display":
+                    continue
                 if isinstance(widget, W.QCheckBox):
                     value = widget.isChecked()
                 elif isinstance(widget, W.QComboBox):
@@ -205,52 +225,53 @@ class Window(W.QMainWindow):
         toolbar.addWidget(self.open_button)
         self.start_button = W.QPushButton("Start")
         self.start_button.setObjectName("primary")
-        self.start_button.clicked.connect(self.start)
+        self.start_button.clicked.connect(self.start_or_stop)
         toolbar.addWidget(self.start_button)
-        self.stop_button = W.QPushButton("Stop")
-        self.stop_button.clicked.connect(lambda: self.call("stop"))
-        toolbar.addWidget(self.stop_button)
-        self.settings_button = W.QPushButton("Settings")
-        self.settings_button.clicked.connect(self.settings)
-        toolbar.addWidget(self.settings_button)
+        self.record_button = W.QPushButton("● Record")
+        self.record_button.clicked.connect(self.toggle_recording)
+        toolbar.addWidget(self.record_button)
         layout.addLayout(toolbar)
         files = W.QHBoxLayout()
-        for title, callback in [
-            ("Load config…", self.load_config),
-            ("Save config…", self.save_config),
-            ("Load template…", self.load_template),
-            ("Save template…", self.save_template),
-        ]:
-            button = W.QPushButton(title)
-            button.clicked.connect(callback)
-            files.addWidget(button)
         files.addStretch()
-        self.display_pause = W.QPushButton("Pause displays")
+        self.display_pause = W.QPushButton("Suspend displays")
         self.display_pause.setCheckable(True)
         self.display_pause.setChecked(config.value.display.suspended)
-        self.display_pause.setToolTip("Freeze video previews and plots to leave CPU for tracking and recording. Status and Stop remain active.")
+        self.display_pause.setToolTip("Suspend video previews and plots while acquisition and tracking continue.")
         self.display_pause.toggled.connect(self.display_changed)
         files.addWidget(self.display_pause)
-        camera_button = W.QPushButton("Camera settings…")
-        camera_button.clicked.connect(self.settings)
-        self.camera_settings_button = camera_button
-        files.addWidget(camera_button)
-        self.camera = W.QSpinBox()
+        layout.addLayout(files)
+        self.camera = W.QSpinBox(self)
         self.camera.setRange(0, 99)
         self.camera.setValue(config.value.source.camera)
-        self.requested_fps = label(
-            f"Requested {config.value.source.fps:g} fps", "muted"
-        )
-        files.addWidget(self.requested_fps)
-        layout.addLayout(files)
-        self.source_label = label(
-            self.saved_source_path
-            or "Live camera · full video is recorded during each session",
-            "muted",
-        )
+        self.camera.hide()
+        source_row = W.QHBoxLayout()
+        self.source_label = label("", "muted")
         self.source_label.setTextInteractionFlags(C.Qt.TextSelectableByMouse)
-        self.source_label.setWordWrap(True)
-        layout.addWidget(self.source_label)
+        self.source_label.setSizePolicy(W.QSizePolicy.Ignored, W.QSizePolicy.Preferred)
+        source_row.addWidget(self.source_label, 1)
+        self.requested_fps = label("", "muted")
+        source_row.addWidget(self.requested_fps)
+        layout.addLayout(source_row)
+        self.file_menu = self.menuBar().addMenu("File")
+        for title, callback in [
+            ("Open video…", self.open_video),
+            ("Save configuration…", self.save_config),
+            ("Load configuration…", self.load_config),
+            ("Save template…", self.save_template),
+            ("Load template…", self.load_template),
+            ("Exit", self.close),
+        ]:
+            self.file_menu.addAction(title, callback)
+        self.menuBar().addAction("Settings", self.settings)
+        calibration = self.menuBar().addMenu("Calibration")
+        placeholder = calibration.addAction("Calibration tools · planned")
+        placeholder.setEnabled(False)
+        tools = self.menuBar().addMenu("Tools")
+        tools.addAction("Timing / performance diagnostics…", self.show_diagnostics)
+        self.diagnostics = None
+        self.diagnostic_values = {}
+        self.source.currentIndexChanged.connect(self.source_controls_changed)
+        self.source_controls_changed()
         metrics_bar = W.QFrame()
         metrics_bar.setObjectName("metricsBar")
         metrics_bar.setStyleSheet(
@@ -341,7 +362,8 @@ class Window(W.QMainWindow):
                 if view is self.eye
                 else (self.circle, self.inset)
             ):
-                header.addWidget(box)
+                box.setParent(self)
+                box.hide()
             column.addLayout(header)
             column.addWidget(view, 1)
             instructions = label(hint, "muted")
@@ -544,7 +566,7 @@ class Window(W.QMainWindow):
         self.param_timer.timeout.connect(self.send_parameters)
         self.timer = C.QTimer(self)
         self.timer.timeout.connect(self.refresh)
-        self.timer.start(40)
+        self.timer.start(max(8, round(1000 / config.value.display.hz)))
         self.update_method_controls()
         self.display_changed(self.display_pause.isChecked())
         add_tooltips(self)
@@ -587,8 +609,8 @@ class Window(W.QMainWindow):
         self.reason_label.setStyleSheet("color:#ff817f;" if error else "color:#f0ad74;")
 
     def display_changed(self, suspended):
-        self.display_pause.setText("Resume displays" if suspended else "Pause displays")
-        self.timer.setInterval(200 if suspended else 40)
+        self.display_pause.setText("Resume displays" if suspended else "Suspend displays")
+        self.timer.setInterval(200 if suspended else max(8, round(1000 / self.service.config.value.display.hz)))
         self.full.setEnabled(not suspended)
         self.eye.setEnabled(not suspended)
         if self.service.run:
@@ -643,16 +665,62 @@ class Window(W.QMainWindow):
         config.value.tracking.template_tracking = self.template_on.isChecked()
         self.call("settings", config=config, callback=lambda: self.call("start"))
 
+    def source_controls_changed(self, *args):
+        video = self.source_mode() is SourceMode.VIDEO
+        self.open_button.setVisible(video)
+        self.start_button.setVisible(not video)
+        self.record_button.setEnabled(False)
+        if (self.service.run and self.service.config.value.source.mode is not self.source_mode()
+                and self.service.snapshot().state != "stopping"):
+            self.call("stop")
+
+    def start_or_stop(self):
+        if self.service.run:
+            self.call("stop")
+        else:
+            self.start()
+
+    def toggle_recording(self):
+        enabled = not self.service.run["recording"].is_set()
+        self.call("record", enabled=enabled)
+
+    def show_diagnostics(self):
+        if self.diagnostics is None:
+            self.diagnostics = W.QDialog(self)
+            self.diagnostics.setWindowTitle("Timing / performance diagnostics")
+            form = W.QFormLayout(self.diagnostics)
+            for title in ("Acquisition rate", "Tracking rate", "Tracking processing",
+                          "GUI refresh rate", "GUI callback", "Acquired frames skipped by tracking",
+                          "Send errors", "Recording buffer"):
+                value = label("—")
+                form.addRow(title, value)
+                self.diagnostic_values[title] = value
+            note = label("Uses existing counters and the latest tracking-loop duration. GUI callback timing is measured only while this window is open. Detailed tracking-stage profiling will be added separately.", "muted")
+            note.setWordWrap(True)
+            form.addRow(note)
+        self.diagnostics.show()
+        self.diagnostics.raise_()
+
+    def apply_view_settings(self, display):
+        self.service.config.value.display = display.model_copy(deep=True)
+        for box, key in ((self.pupil_mask, "pupil_mask"), (self.cr_mask, "cr_mask"),
+                         (self.crosshairs, "crosshairs"), (self.circle, "template_circle"),
+                         (self.inset, "template_inset")):
+            value = getattr(display, key)
+            box.setChecked(display.masks if value is None and "mask" in key else True if value is None else value)
+        self.display_changed(display.suspended)
+        if self.service.run:
+            self.call("display", suspended=display.suspended, hz=display.hz)
+
     def settings(self):
         config = cfg.MxEyeConfigStore(self.service.config.value.model_copy(deep=True))
         config.value.source.camera = self.camera.value()
         dialog = Settings(config, self)
         if dialog.exec() == W.QDialog.Accepted:
-            self.camera.setValue(dialog.config.value.source.camera)
-            self.requested_fps.setText(
-                f"Requested {dialog.config.value.source.fps:g} fps"
-            )
-            self.call("settings", config=dialog.config)
+            if not self.service.run:
+                self.camera.setValue(dialog.config.value.source.camera)
+                self.call("settings", config=dialog.config)
+            self.apply_view_settings(dialog.config.value.display)
 
     def pause_changed(self, paused):
         self.pause.setText("Play" if paused else "Pause")
@@ -831,6 +899,7 @@ class Window(W.QMainWindow):
             self.mode.setCurrentText(config.value.tracking.tracking_mode.value)
             self.pupil_method.setCurrentIndex(max(0, self.pupil_method.findData(config.value.tracking.pupil_method.value)))
             self.display_pause.setChecked(config.value.display.suspended)
+            self.apply_view_settings(config.value.display)
             self.coordinates.setCurrentIndex(
                 max(
                     0,
@@ -857,6 +926,27 @@ class Window(W.QMainWindow):
                 box.setChecked(default if value is None else value)
 
     def refresh(self):
+        measuring = self.diagnostics is not None and self.diagnostics.isVisible()
+        if measuring:
+            started = time.perf_counter()
+            previous = getattr(self, "diagnostic_previous", None)
+            interval = started - previous if previous is not None else None
+            self.diagnostic_previous = started
+        else:
+            self.diagnostic_previous = None
+        self.refresh_contents()
+        if measuring:
+            state = self.service.snapshot()
+            values = (f"{self.rates[0]:.1f} fps", f"{self.rates[1]:.1f} fps",
+                      f"{state.stats.processing_us / 1000:.3f} ms (latest sample)",
+                      f"{1 / interval:.1f} Hz measured" if interval else "—",
+                      f"{(time.perf_counter() - started) * 1000:.3f} ms",
+                      str(state.stats.tracking_skips), str(state.stats.send_errors),
+                      str(int(state.stats.enqueued - state.stats.written)))
+            for widget, value in zip(self.diagnostic_values.values(), values):
+                widget.setText(value)
+
+    def refresh_contents(self):
         for future, callback in list(self.pending):
             if future.done():
                 self.pending.remove((future, callback))
@@ -868,8 +958,8 @@ class Window(W.QMainWindow):
                     self.navigation_pending = None
                     self.deferred_video_action = None
                     self.queued_seek = None
-                    self.full.setEnabled(True)
-                    self.eye.setEnabled(True)
+                    self.full.setEnabled(not self.display_pause.isChecked())
+                    self.eye.setEnabled(not self.display_pause.isChecked())
                     W.QMessageBox.warning(
                         self,
                         "mx_eye",
@@ -887,44 +977,33 @@ class Window(W.QMainWindow):
                 self.start()
             else:
                 self.pending_video_path = None
-        self.source_label.setText(
-            self.saved_source_path
-            if mode is SourceMode.VIDEO
-            else (
-                "Artificial eye · no camera required"
-                if mode is SourceMode.SIMULATION
-                else "Live camera · full video is recorded during each session"
-            )
-        )
-        if mode is SourceMode.CAMERA and state.source.width:
-            info = state.source
-            name = f"Camera {self.camera.value()}"
-            camera_mode = f"{info.width} × {info.height} · {info.actual_format}"
-            if info.driver_fps is not None:
-                camera_mode += f" · driver {info.driver_fps:g} fps"
-            self.source_label.setText(
-                f"{name} · {camera_mode} · full video is recorded"
-                + (f" · {self.service.recording_path_info}" if self.service.recording_path_info else "")
-                + (f" · {self.service.camera_control_info}" if self.service.camera_control_info else "")
-            )
+        source = self.service.config.value.source
+        name = (Path(self.saved_source_path).name if mode is SourceMode.VIDEO
+                else "Simulation" if mode is SourceMode.SIMULATION
+                else source.camera_name or source.device or f"Camera {self.camera.value()}")
+        self.source_label.setText(self.source_label.fontMetrics().elidedText(
+            name, C.Qt.ElideMiddle, max(0, self.source_label.width())))
+        self.source_label.setToolTip(self.saved_source_path if mode is SourceMode.VIDEO else name)
+        fps = state.source.fps if mode is SourceMode.VIDEO else source.fps
+        self.requested_fps.setText(f"{fps:g} fps" + (" requested" if mode is SourceMode.CAMERA else ""))
         active = state.state in ("running", "starting", "stopping")
-        for widget in (
-            self.start_button,
-            self.source,
-            self.settings_button,
-            self.camera_settings_button,
-            self.camera,
-        ):
-            widget.setEnabled(not active and not self.pending)
+        self.start_button.setText("Stop" if active else "Start")
+        self.start_button.setEnabled(not self.pending and state.state != "stopping")
+        self.source.setEnabled(state.state != "stopping" and not self.pending)
         self.open_button.setEnabled(not self.pending and not self._closing)
-        self.stop_button.setEnabled(active)
+        run = self.service.run
+        recording = bool(run and run["recording"].is_set())
+        draining = bool(run and not recording and not run["writer_done"].is_set())
+        self.record_button.setText("■ Stop recording" if recording else "Finalizing…" if draining else "● Record")
+        self.record_button.setEnabled(state.state == "running" and mode is not SourceMode.VIDEO
+                                      and not draining and not self.pending and not state.stats.record_fault)
         video = active and self.service.config.value.source.mode is SourceMode.VIDEO
         if not video:
             self.navigation_pending = None
             self.queued_seek = None
             self.deferred_video_action = None
-            self.full.setEnabled(True)
-            self.eye.setEnabled(True)
+            self.full.setEnabled(not self.display_pause.isChecked())
+            self.eye.setEnabled(not self.display_pause.isChecked())
         self.coordinates.setEnabled(self.tracking_mode() is TrackingMode.PUPIL_ONLY)
         self.speed.setEnabled(mode is SourceMode.VIDEO and state.state != "stopping")
         for widget in (self.pause, self.back, self.step, self.timeline):
@@ -1047,8 +1126,8 @@ class Window(W.QMainWindow):
             and payload.get("navigation_id", 0) >= self.navigation_pending
         ):
             self.navigation_pending = None
-            self.full.setEnabled(True)
-            self.eye.setEnabled(True)
+            self.full.setEnabled(not self.display_pause.isChecked())
+            self.eye.setEnabled(not self.display_pause.isChecked())
             if self.queued_seek is not None:
                 target, self.queued_seek = self.queued_seek, None
                 self.deferred_video_action = None

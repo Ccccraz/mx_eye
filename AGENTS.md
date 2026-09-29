@@ -67,8 +67,9 @@ and provenance. The workspace members live in `packages/mx-eye`,
   values as well as small increments. The controls scroll when space is tight.
 - **Settings:** camera index, requested mode/FPS, network addresses/ports, recording
   location, buffer size, and codec. Changes require a stopped session.
-- **Visible controls:** Load/Save config in the top row; camera index and requested FPS beside
-  them. Playback speed is next to Pause and the timeline, and can change live.
+- **Visible controls:** Source, Start/Stop (or Open video), and independent Record
+  occupy the first row; Suspend displays is below. Source name and relevant FPS
+  share the information row. Playback controls stay beside the timeline.
 - **Video layout:** equally sized eye-detail (left) and source (right) panels.
   Pupil/CR mask switches and Centers sit above eye detail. Template size and Template inset above
   the source independently toggle the template-radius circle and small template
@@ -83,7 +84,11 @@ and provenance. The workspace members live in `packages/mx-eye`,
   atomically and omits unset display switches. The GUI resolves the single
   process-wide store from `config.store()` and injects it into the service, while
   every worker process receives a per-session copy.
-- **Load/Save template:** visible top-row buttons import an image or export PNG.
+- **Menus:** File handles configuration/template loading and saving, video opening
+  and Exit. Settings contains Camera, Network, Recording and View. View refresh
+  rate and overlays can change live; other settings require a stopped session.
+  Tools contains optional diagnostics from existing counters and GUI timing only
+  while open. Calibration is a placeholder.
 
 Camera index 0 is usually the first camera. On Windows, Auto chooses DirectShow;
 MSMF is available if the camera works better with that backend. Set a camera mode
@@ -99,7 +104,8 @@ OpenCV receives UVC cameras; Raspberry Pi CSI/libcamera capture is not implement
    transmission. It does no GUI rendering, video encoding, or disk writing.
 3. **Recording process:** consumes a separate bounded FIFO, encodes full frames,
    and writes frame timestamps and tracking rows.
-4. **GUI:** displays the latest preview frame and updates plots at 25 Hz. It never
+4. **GUI:** displays the latest preview frame and updates plots at the configured
+   View refresh rate (default 25 Hz). It never
    requests or schedules the next camera frame.
 
 The source-to-tracker mailbox, UI preview mailbox, and recording FIFO use shared memory. Slot
@@ -121,9 +127,9 @@ multiprocessing. Running individual GUI/worker definitions interactively is not 
 
 ## Recording and integrity
 
-Every **camera session records automatically**, from Start until Stop. Simulation
-recording is optional; file playback does not duplicate the source video.
-Each session gets a unique subfolder under the configured output directory:
+Camera and simulation tracking start without recording. **Record** independently
+starts and stops recording; file playback does not duplicate the source video.
+Each recording gets a unique subfolder under the configured output directory:
 
 | File | Contents |
 |---|---|
@@ -137,7 +143,7 @@ Each session gets a unique subfolder under the configured output directory:
 `frames.csv` is the timing authority. Video containers use a nominal constant FPS;
 actual camera frame intervals may vary. Frame IDs connect video to tracking rows.
 Parameter adjustments during acquisition affect tracking.csv; config.json records
-starting settings only. Save the final configuration separately if needed.
+settings at recording start only. Save the final configuration separately if needed.
 
 The configurable memory budget is a finite buffer, not an unlimited guarantee.
 If the writer cannot keep up and that buffer fills, recording stops accepting new
@@ -402,3 +408,18 @@ Reference documentation: [Python multiprocessing](https://docs.python.org/3/libr
 [OpenCV camera/video I/O](https://docs.opencv.org/4.x/d8/dfe/classcv_1_1VideoCapture.html),
 [OpenCV VideoWriter](https://docs.opencv.org/4.x/dd/d9e/classcv_1_1VideoWriter.html),
 [Qt threads](https://doc.qt.io/qtforpython-6/PySide6/QtCore/QThread.html).
+
+## Independent recording
+
+The service reserves the configured shared frame-ring budget at tracking start so
+capture/tracking processes can use it without passing large images through pipes.
+No writer process runs and no frames/samples are copied into recording queues until
+Record is enabled. Each Record cycle starts a fresh writer and folder. Shared ring
+indices persist across writers. Stop recording clears the producer gate; capture
+acknowledges at its next loop boundary and tracking sends a FIFO sentinel after its
+last logged row. The writer drains frames/rows before finalizing. Recording-only
+frame counts determine completeness, rather than all frames acquired during the
+longer tracking session. Stop tracking also ends and drains an active recording.
+The internal recording count is excluded from the public protocol statistics.
+The old record_simulation configuration field is accepted for compatibility but
+no longer starts recording automatically.

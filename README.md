@@ -41,7 +41,7 @@ The **Pupil method** selector offers the original threshold detector,
 Starburst-style radial edges, edge/ellipse fitting, and adaptive thresholding.
 The method selected at session start is saved in `config.json`; `tracking.csv`
 retains its established 17-column format. **Reason** shows the latest rejected pupil/CR sample on
-the right side of the rate bar. **Pause displays** reduces preview/plot work
+the right side of the rate bar. **Suspend displays** reduces preview/plot work
 while acquisition, tracking, network output and recording continue. Settings
 can import the previous desktop app's version 1 JSON configuration; the old
 `sync_port` setting is retired because clocks now synchronize through the OS.
@@ -100,3 +100,22 @@ tracker is not publishing, a closed or broken stream raises `ConnectionError`
 (connect again to resume), and a malformed frame raises `ValueError`. Coordinates
 are uncalibrated source-image pixels. A runnable example:
 `uv run python -m mx_eye_client.receive_minimal`. More detail in AGENTS.md.
+
+### GUI controls
+
+Use **File** to open a video or save/load configurations and templates. **Settings**
+contains Camera, Network, Recording and View tabs; View controls GUI refresh rate
+and overlay visibility independently of acquisition/tracking. View options can be
+changed while tracking; source/network/recording settings require a stopped session.
+
+The source controls show Start/Stop for camera and simulation, or Open video for
+file playback. Switching source stops the current session. **Record** starts and
+stops recording independently; tracking starts without recording. Each recording
+gets its own folder, video, timestamps and tracking CSV. Wait for Finalizing to
+finish before starting another recording. Recording is disabled for file playback.
+
+**Tools → Timing / performance diagnostics** displays existing rates, latest
+tracking-loop duration, skipped frames, send errors, buffer backlog, and GUI timing.
+GUI callback timing is collected only while the diagnostics window is visible.
+Detailed per-stage profiling and calibration tools are planned separately;
+Calibration is currently a menu placeholder.
