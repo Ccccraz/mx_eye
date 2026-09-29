@@ -601,7 +601,7 @@ def tracking_worker(
                     stats["send_errors"].value += 1
                 if samples is not None:
                     try:
-                        samples.put_nowait((payload, core.config.pupil_method.value))
+                        samples.put_nowait(payload)
                     except queue.Full:
                         if not stats["log_fault"].value:
                             report(
