@@ -22,7 +22,6 @@ from mx_eye_protocol.data_frame import (
 )
 
 from .config import (
-    CameraBackend,
     PupilCoordinates,
     RecordingCodec,
     SourceMode,
@@ -87,32 +86,33 @@ class FrameRing:
         self.meta = ctx.RawArray("q", 5 * capacity)
         self.free = ctx.Semaphore(capacity)
         self.ready = ctx.Semaphore(0)
-        self.write_index = self.read_index = 0
+        self.write_index = ctx.RawValue("q", 0)
+        self.read_index = ctx.RawValue("q", 0)
 
     def put(self, frame, meta):
         if not self.free.acquire(False):
             return False
-        i = self.write_index % self.capacity
+        i = self.write_index.value % self.capacity
         np.frombuffer(
             self.pixels, np.uint8, count=frame.size, offset=i * self.max_bytes
         )[:] = frame.reshape(-1)
         shape = (-1, frame.size) if frame.ndim == 1 else frame.shape[:2]
         self.meta[i * 5 : i * 5 + 5] = [*meta, *shape]
-        self.write_index += 1
+        self.write_index.value += 1
         self.ready.release()
         return True
 
     def get(self, timeout=0.02, copy=True):
         if not self.ready.acquire(timeout=timeout):
             return None
-        i = self.read_index % self.capacity
+        i = self.read_index.value % self.capacity
         fid, acquired, media, h, w = self.meta[i * 5 : i * 5 + 5]
         frame = np.frombuffer(self.pixels, np.uint8,
                               count=w if h == -1 else h * w * 3,
                               offset=i * self.max_bytes)
         if h != -1:
             frame = frame.reshape(h, w, 3)
-        self.read_index += 1
+        self.read_index.value += 1
         if copy:
             frame = frame.copy()
             self.free.release()
@@ -221,7 +221,8 @@ def synthetic_frame(index, width, height, fps):
 
 
 def capture_worker(
-    config, mailbox, ring, stop, done, paused, commands, tracked_frame, stats, events
+    config, mailbox, ring, stop, done, paused, commands, tracked_frame, stats, events,
+    recording=None, recording_stop=None, recording_capture_done=None, recording_generation=None,
 ):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     cv2.setNumThreads(1)
@@ -298,6 +299,9 @@ def capture_worker(
                 requested_fps=source.fps,
             )
         while not stop.is_set():
+            generation = recording_generation.value if recording_generation is not None else 0
+            if recording_stop is not None and recording_stop.is_set():
+                recording_capture_done.value = generation
             step = False
             try:
                 while True:
@@ -419,7 +423,10 @@ def capture_worker(
                         frame, (fid, acquired, media, index, navigation_id)
                     ):
                         stop.wait(0.0005)
-            if ring is not None and not stats["record_fault"].value:
+            if (ring is not None and not stats["record_fault"].value
+                    and (recording is None or recording.is_set())):
+                if "record_acquired" in stats:
+                    stats["record_acquired"].value += 1
                 if ring.put(frame, (fid, acquired, media)):
                     stats["enqueued"].value += 1
                 else:
@@ -443,6 +450,8 @@ def capture_worker(
             reader.close()
         if cap is not None:
             cap.release()
+        if recording_capture_done is not None:
+            recording_capture_done.value = recording_generation.value
         done.set()
 
 
@@ -459,9 +468,11 @@ def tracking_worker(
     tracked_frame,
     stats,
     events,
+    recording=None, recording_stop=None, recording_generation=None,
 ):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     cv2.setNumThreads(1)
+    recording_marker_generation = 0
     report(events, "priority", message=priority("tracking"))
     core = Tracker(config.value.tracking)
     if config.value.template:
@@ -483,6 +494,11 @@ def tracking_worker(
             destination = (str(net.udp_host), net.data_port)
         report(events, "tracking_ready")
         while True:
+            generation = recording_generation.value if recording_generation is not None else 0
+            if (recording_marker_generation < generation
+                    and recording_stop is not None and recording_stop.is_set()):
+                samples.put(None)  # FIFO boundary after all rows from this producer.
+                recording_marker_generation = generation
             changed = False
             try:
                 for _ in range(32):
@@ -491,6 +507,8 @@ def tracking_worker(
                     kind = cmd["command"]
                     if kind == "display":
                         display_suspended = bool(cmd["suspended"])
+                        if "hz" in cmd:
+                            config.value.display.hz = cmd["hz"]
                     elif kind == "config":
                         previous_mode = core.config.tracking_mode
                         previous_method = core.config.pupil_method
@@ -599,7 +617,7 @@ def tracking_worker(
                         udp.sendto(data, destination)
                 except (BlockingIOError, OSError):
                     stats["send_errors"].value += 1
-                if samples is not None:
+                if samples is not None and (recording is None or recording.is_set()):
                     try:
                         samples.put_nowait(payload)
                     except queue.Full:
@@ -650,6 +668,9 @@ def tracking_worker(
             udp.close()
         # Ensure the feeder flushes sample rows before declaring tracking done.
         if samples is not None:
+            if (recording_generation is not None
+                    and recording_marker_generation < recording_generation.value):
+                samples.put(None)
             if stats["record_fault"].value == 3:
                 samples.cancel_join_thread()
             samples.close()
@@ -696,6 +717,7 @@ def writer_worker(
     stats,
     events,
     test_delay=0,
+    recording_capture_done=None, recording_generation=0,
 ):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     cv2.setNumThreads(1)
@@ -704,6 +726,8 @@ def writer_worker(
     writer = None
     error = ""
     video_index = 0
+    sample_count = 0
+    log_finished = False
     shape = None
     frame_file = sample_file = None
     try:
@@ -718,7 +742,12 @@ def writer_worker(
         while True:
             for _ in range(256):
                 try:
-                    sw.writerow(tracking_row(samples.get_nowait()))
+                    sample = samples.get_nowait()
+                    if sample is None:
+                        log_finished = True
+                    else:
+                        sw.writerow(tracking_row(sample))
+                        sample_count += 1
                 except queue.Empty:
                     break
             item = ring.get(timeout=0.01, copy=False)
@@ -754,14 +783,17 @@ def writer_worker(
                     frame_file.flush()
                     sample_file.flush()
             elif (
-                capture_done.is_set()
-                and tracking_done.is_set()
+                (recording_capture_done.value >= recording_generation if recording_capture_done is not None else capture_done.is_set())
+                and (log_finished if recording_capture_done is not None else tracking_done.is_set())
                 and stats["written"].value >= stats["enqueued"].value
             ):
                 # tracking_done is set only after its sample-queue feeder flushed.
                 while True:
                     try:
-                        sw.writerow(tracking_row(samples.get_nowait()))
+                        sample = samples.get_nowait()
+                        if sample is not None:
+                            sw.writerow(tracking_row(sample))
+                            sample_count += 1
                     except queue.Empty:
                         break
                 break
@@ -774,9 +806,9 @@ def writer_worker(
             message=f"Recording failed: {error}. Tracking continues.",
         )
         # Keep consuming log rows so a writer failure cannot deadlock tracker exit.
-        while not tracking_done.is_set():
+        while not (log_finished or tracking_done.is_set()):
             try:
-                samples.get(timeout=0.05)
+                log_finished = samples.get(timeout=0.05) is None
             except queue.Empty:
                 pass
     finally:
@@ -802,14 +834,14 @@ def writer_worker(
                 file.close()
         summary = dict(
             session=session,
-            acquired=int(stats["acquired"].value),
+            acquired=int(stats.get("record_acquired", stats["acquired"]).value),
             written=video_index,
-            tracking_samples=int(stats["tracked"].value),
+            tracking_samples=sample_count,
             complete=(
                 not error
                 and not stats["record_fault"].value
                 and not stats["capture_fault"].value
-                and video_index == stats["acquired"].value
+                and video_index == stats.get("record_acquired", stats["acquired"]).value
             ),
             tracking_log_complete=not bool(stats["log_fault"].value),
             recording_fault=int(stats["record_fault"].value),

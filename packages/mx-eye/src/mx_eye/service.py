@@ -126,7 +126,7 @@ class Service:
                 message=self.message,
                 paused=bool(run and run["paused"].is_set()),
                 session=self.session,
-                stats=TrackingStats.model_validate(stats),
+                stats=TrackingStats.model_validate({k: v for k, v in stats.items() if k in TrackingStats.model_fields}),
                 directory=self.directory,
                 network=NetworkStatus.model_validate(
                     self.config.value.network, from_attributes=True
@@ -211,11 +211,10 @@ class Service:
         if not 0 < width <= 16384 or not 0 < height <= 16384:
             raise ValueError("Unsupported source dimensions.")
         max_bytes = width * height * 3
-        record = s.mode is SourceMode.CAMERA or (
-            s.mode is SourceMode.SIMULATION and config.value.recording.record_simulation
-        )
+        recordable = s.mode is not SourceMode.VIDEO
         c = self.ctx
         stats = {k: c.Value("d", 0) for k in STAT_NAMES}
+        stats["record_acquired"] = c.Value("d", 0)
         run = dict(
             stats=stats,
             stop=c.Event(),
@@ -229,8 +228,12 @@ class Service:
             events=c.Queue(64),
             tracked_frame=c.Value("q", 0),
             mailbox=Mailbox(c, max_bytes),
-            samples=c.Queue(4096) if record else None,
-            ring=None,
+            samples=c.Queue(4096) if recordable else None,
+            ring=FrameRing(c, max_bytes, max(2, int(config.value.recording.buffer_mb * 1024**2 / max_bytes))) if recordable else None,
+            recording=c.Event(),
+            recording_generation=c.Value("q", 0),
+            recording_stop=c.Event(),
+            recording_capture_done=c.Value("q", 0),
             processes={},
             stop_time=None,
             ready=set(),
@@ -246,36 +249,7 @@ class Service:
         self.state, self.message = "starting", "Opening source…"
         self.run = run
         try:
-            if record:
-                capacity = max(
-                    2, int(config.value.recording.buffer_mb * 1024**2 / max_bytes)
-                )
-                run["ring"] = FrameRing(c, max_bytes, capacity)
-                stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.directory = str(
-                    Path(config.value.recording.directory).expanduser().resolve()
-                    / f"{stamp}_{self.session:016x}"
-                )
-                writer = c.Process(
-                    target=writer_worker,
-                    name="mx-eye recording",
-                    args=(
-                        config,
-                        self.session,
-                        self.directory,
-                        run["ring"],
-                        run["samples"],
-                        run["capture_done"],
-                        run["tracking_done"],
-                        run["writer_done"],
-                        stats,
-                        run["events"],
-                    ),
-                )
-                writer.start()
-                run["processes"]["writer"] = writer
-            else:
-                run["writer_done"].set()
+            run["writer_done"].set()
             tracker = c.Process(
                 target=tracking_worker,
                 name="mx-eye tracking",
@@ -292,11 +266,14 @@ class Service:
                     run["tracked_frame"],
                     stats,
                     run["events"],
+                    run["recording"],
+                    run["recording_stop"],
+                    run["recording_generation"],
                 ),
             )
             tracker.start()
             run["processes"]["tracker"] = tracker
-            required = {"tracking_ready"} | ({"writer_ready"} if record else set())
+            required = {"tracking_ready"}
             deadline = time.monotonic() + 10
             while not required <= run["ready"]:
                 self._events()
@@ -319,6 +296,10 @@ class Service:
                     run["tracked_frame"],
                     stats,
                     run["events"],
+                    run["recording"],
+                    run["recording_stop"],
+                    run["recording_capture_done"],
+                    run["recording_generation"],
                 ),
             )
             capture.start()
@@ -347,8 +328,64 @@ class Service:
                     run[event].set()
             raise
 
+    def _record(self, enabled):
+        run = self.run
+        if not run or self.state != "running" or run["ring"] is None:
+            raise RuntimeError("Start camera or simulation tracking before recording.")
+        if not enabled:
+            run["recording"].clear()
+            run["recording_stop"].set()
+            return self.snapshot()
+        if run["recording"].is_set():
+            return self.snapshot()
+        previous = run["processes"].get("writer")
+        if previous is not None:
+            if not run["writer_done"].is_set() or previous.is_alive():
+                raise RuntimeError("Wait for the previous recording to finish draining.")
+            previous.join()
+        if run["stats"]["record_fault"].value:
+            raise RuntimeError("Restart tracking after resolving the recording fault.")
+        for key in ("enqueued", "written", "record_acquired", "log_fault"):
+            run["stats"][key].value = 0
+        run["recording_stop"].clear()
+        run["writer_done"].clear()
+        run["ready"].discard("writer_ready")
+        config = MxEyeConfigStore(self.config.value.model_copy(deep=True))
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.directory = str(Path(config.value.recording.directory).expanduser().resolve()
+                             / f"{stamp}_{self.session:016x}")
+        writer = self.ctx.Process(
+            target=writer_worker, name="mx-eye recording",
+            args=(config, self.session, self.directory, run["ring"], run["samples"],
+                  run["capture_done"], run["tracking_done"], run["writer_done"],
+                  run["stats"], run["events"]),
+            kwargs={"recording_capture_done": run["recording_capture_done"],
+                    "recording_generation": run["recording_generation"].value + 1},
+        )
+        run["recording_generation"].value += 1
+        try:
+            writer.start()
+            run["processes"]["writer"] = writer
+            deadline = time.monotonic() + 10
+            while "writer_ready" not in run["ready"]:
+                self._events()
+                if run["stats"]["record_fault"].value or writer.exitcode is not None:
+                    raise RuntimeError(self.message or "Recording could not initialize.")
+                if time.monotonic() > deadline:
+                    raise TimeoutError("Recording did not initialize within 10 seconds.")
+                time.sleep(0.01)
+        except Exception:
+            run["recording_stop"].set()
+            if writer.pid is None:
+                run["writer_done"].set()
+            raise
+        run["recording"].set()
+        return self.snapshot()
+
     def _stop(self):
         if self.run:
+            self.run["recording"].clear()
+            self.run["recording_stop"].set()
             self.run["stop"].set()
             if self.run["stop_time"] is None:
                 self.run["stop_time"] = time.monotonic()
@@ -386,6 +423,9 @@ class Service:
             return
         self._events()
         self._collect_preview()
+        if run["stats"]["record_fault"].value and run["recording"].is_set():
+            run["recording"].clear()
+            run["recording_stop"].set()
         pairs = [
             ("capture", "capture_done", "capture_fault"),
             ("tracker", "tracking_done", "tracking_fault"),
@@ -464,6 +504,8 @@ class Service:
             self.run = None
 
     def _execute(self, command, args):
+        if command == "record":
+            return self._record(bool(args["enabled"]))
         if command == Command.START:
             return self._start()
         if command == Command.STOP:
@@ -502,6 +544,8 @@ class Service:
             self.config.value.template = None
         if command == "display":
             self.config.value.display.suspended = bool(args["suspended"])
+            if "hz" in args:
+                self.config.value.display.hz = args["hz"]
         if not self.run:
             if command == "roi":
                 self.config.value.tracking.roi = tuple(args["roi"])
